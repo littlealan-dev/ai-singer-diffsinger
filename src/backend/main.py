@@ -67,9 +67,11 @@ from src.backend.synthesis_pricing import (
 )
 from src.api.sing_all_estimate import quote_facts
 from src.backend.sing_all import (
-    add_mixes_item, available_balance_from_user, build_items, choices_hash, mark_voice_ranges,
+    ACTIVE_JOB_STATUSES, ENDED_ITEM_STATUSES, add_mixes_item, available_balance_from_user, build_items, choices_hash, mark_voice_ranges,
     job_from_quote, materialize_rows, progress as sing_all_progress, quote_lines,
-    quoted_instruments_sound,
+    quoted_instruments_sound, wanted_takes, retry_items as sing_all_retry_items,
+    retry_job as sing_all_retry_job, retry_quote as sing_all_retry_quote,
+    retryable as sing_all_retryable,
     quote_notes, singing_language_options, style_changes,
     summary_with_judged_instruments, supported_singing_languages,
 )
@@ -79,7 +81,8 @@ from src.backend.sing_all_judgment import (
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
 from src.backend.language_selection import normalize_language_code
 from src.backend.sing_all_store import (
-    active_job_for_song, apply as apply_sing_all_job, create_job_with_reservations,
+    active_job_for_song, answer_decision as answer_sing_all_decision_record,
+    apply as apply_sing_all_job, create_job_with_reservations,
     latest_judgment, running_jobs as running_sing_all_jobs,
     load as load_sing_all_job,
     read_judgment, read_quote, read_style,
@@ -420,6 +423,16 @@ class SingAllJobRequest(BaseModel):
     quoteId: str = Field(min_length=1, max_length=200)
 
 
+class SingAllDecisionRequest(BaseModel):
+    action: Literal["continue", "cancel"]
+    accept: list[str] = Field(default_factory=list, max_length=100)
+    heldCredits: Optional[int] = None
+
+
+class SingAllRetryRequest(BaseModel):
+    total: int = Field(ge=0)
+
+
 class SingAllReconcileRequest(BaseModel):
     jobId: str = Field(min_length=1, max_length=200)
 
@@ -514,10 +527,10 @@ class FeedbackSubmitRequest(BaseModel):
 
 
 def _running_sing_all_job(user_id: str, user_record: Dict[str, Any]) -> Dict[str, Any] | None:
-    """Resolve the user's active pointer only while its parent still runs."""
+    """Resolve the user's active pointer only while its parent still runs or waits for a decision."""
     job_id = user_record.get("activeSingAllJobId")
     job = load_sing_all_job(job_id) if isinstance(job_id, str) and job_id else None
-    if job and job.get("uid") == user_id and job.get("status") == "running":
+    if job and job.get("uid") == user_id and job.get("status") in ACTIVE_JOB_STATUSES:
         return job
     return None
 
@@ -1458,6 +1471,95 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail={"code": "job_not_found"})
         return sing_all_progress(job, emails_on=sing_all_emails_on(settings))
 
+    @app.post("/sing-all/jobs/{job_id}/decision")
+    async def answer_sing_all_decision(
+        job_id: str, payload: SingAllDecisionRequest, request: Request,
+    ) -> Dict[str, Any]:
+        """The owner's answer to a paused Sing All: go on with what can be sung, or cancel."""
+        user_id = await _get_user_id_or_401(request)
+        outcome, job = await asyncio.to_thread(
+            answer_sing_all_decision_record, job_id, user_id, action=payload.action,
+            accept=list(payload.accept), held_credits=payload.heldCredits)
+        if outcome == "job_not_found":
+            raise HTTPException(status_code=404, detail={"code": "job_not_found"})
+        if outcome == "invalid_decision":
+            raise HTTPException(status_code=422, detail={"code": "invalid_decision"})
+        if outcome == "nothing_to_sing":
+            raise HTTPException(status_code=409, detail={"code": "nothing_to_sing"})
+        if outcome in {"decision_closed", "decision_changed"}:
+            raise HTTPException(status_code=409, detail={
+                "code": outcome, "job": sing_all_progress(job, emails_on=sing_all_emails_on(settings))})
+        # One pass carries out the answer (refunds, or the cancel); the rest runs in the queue.
+        await SingAllRunner(request.app.state.orchestrator).reconcile(job_id, max_passes=1)
+        await request.app.state.orchestrator._enqueue_sing_all_reconcile(job_id)
+        job = await asyncio.to_thread(load_sing_all_job, job_id) or job
+        return sing_all_progress(job, emails_on=sing_all_emails_on(settings))
+
+    async def _sing_all_retry_plan(
+        request: Request, job_id: str, user_id: str,
+    ) -> tuple[Dict[str, Any], str, list[Dict[str, Any]], Dict[str, Any]]:
+        """The job to retry, the new job's id, its items and the mini quote, or the refusal."""
+        original = await asyncio.to_thread(load_sing_all_job, job_id)
+        if not original or original.get("uid") != user_id:
+            raise HTTPException(status_code=404, detail={"code": "job_not_found"})
+        if not sing_all_retryable(original):
+            raise HTTPException(status_code=409, detail={"code": "not_retryable"})
+        snapshot = await _get_snapshot_or_404(
+            request.app.state.sessions, original["sessionId"], user_id)
+        version = (snapshot.get("current_score") or {}).get("version")
+        if (snapshot.get("score_id") != original.get("scoreId")
+                or version != original.get("finalScoreVersion")):
+            # The failed takes were priced and assigned on the score the job ended on.
+            raise HTTPException(status_code=409, detail={"code": "score_changed"})
+        scope = instrumental_charge_scope(user_id, original["sessionId"], original["scoreId"])
+        instrumental_required = await asyncio.to_thread(
+            get_instrumental_charge_state, scope) != "paid"
+        new_job_id = uuid.uuid4().hex
+        items = sing_all_retry_items(original, job_id=new_job_id,
+                                     instrumental_required=instrumental_required)
+        return original, new_job_id, items, sing_all_retry_quote(original, items)
+
+    @app.get("/sing-all/jobs/{job_id}/retry")
+    async def get_sing_all_retry_quote(job_id: str, request: Request) -> Dict[str, Any]:
+        """The mini quote for singing a job's failed takes again; nothing is written."""
+        user_id = await _get_user_id_or_401(request)
+        _original, _new_job_id, _items, quote = await _sing_all_retry_plan(request, job_id, user_id)
+        return quote
+
+    @app.post("/sing-all/jobs/{job_id}/retry")
+    async def start_sing_all_retry(
+        job_id: str, payload: SingAllRetryRequest, request: Request,
+    ) -> Dict[str, Any]:
+        """Sing a job's failed takes again as a new job, if the total is the one the card showed."""
+        user_id, user_email = await _get_user_context_or_401(request)
+        original, new_job_id, items, quote = await _sing_all_retry_plan(request, job_id, user_id)
+        if payload.total != quote["total"]:
+            raise HTTPException(status_code=409, detail={"code": "quote_changed", "quote": quote})
+        db = get_firestore_client()
+        user_record = await asyncio.to_thread(
+            lambda: db.collection("users").document(user_id).get().to_dict() or {})
+        if (user_record.get("billing") or {}).get("activePlanKey") == "free":
+            raise HTTPException(status_code=409, detail={"code": "free_plan"})
+        job = sing_all_retry_job(original, job_id=new_job_id, items=items,
+                                 notify_email=user_email.strip() or None)
+        scope = instrumental_charge_scope(user_id, original["sessionId"], original["scoreId"])
+        result = await asyncio.to_thread(
+            create_job_with_reservations, job,
+            instrumental_scope=scope if any(item["type"] == "instrumental" for item in items)
+            else None)
+        if result.status != "reserved":
+            code = (result.reason if result.status == "refused" else
+                    "not_enough_credits" if result.status == "insufficient_balance" else result.status)
+            detail: Dict[str, Any] = {"code": code}
+            if code == "sing_all_already_running":
+                active_job = await asyncio.to_thread(_running_sing_all_job, user_id, user_record)
+                if active_job:
+                    detail.update(activeJobId=active_job["jobId"],
+                                  activeSongId=active_job["sessionId"])
+            raise HTTPException(status_code=409, detail=detail)
+        await request.app.state.orchestrator._enqueue_sing_all_reconcile(new_job_id)
+        return sing_all_progress(job, emails_on=sing_all_emails_on(settings))
+
     @app.get("/sing-all/jobs/{job_id}/download")
     async def download_sing_all_package(job_id: str, request: Request) -> Dict[str, Any]:
         user_id = await _get_user_id_or_401(request)
@@ -1834,10 +1936,11 @@ def create_app() -> FastAPI:
                     if parent.get("cancelRequested") or await asyncio.to_thread(
                         apply_sing_all_job, parent_id, {"cancelRequested": True},
                         expected_stage=parent["stage"], expected_revision=parent.get("revision", 0),
+                        expected_status=parent["status"],
                     ):
                         break
                     parent = await asyncio.to_thread(load_sing_all_job, parent_id)
-                    if not parent or parent.get("status") != "running":
+                    if not parent or parent.get("status") not in ACTIVE_JOB_STATUSES:
                         break
                     if parent.get("stage") == "packaging":
                         packaging = True
@@ -1851,14 +1954,14 @@ def create_app() -> FastAPI:
                         or ended.get("status") == "completed")
             if not packaging and ended.get("status") == "running" and takes:
                 remaining = [item for item in takes if item.get("status") not in
-                             {"done", "failed", "stopped"}]
+                             ENDED_ITEM_STATUSES]
                 children = await asyncio.gather(*(
                     asyncio.to_thread(job_store.get_job, item["childJobId"])
                     for item in remaining
                 ))
                 too_late = (bool(remaining)
                             and all((child or {}).get("pastStopPoint") for child in children)
-                            and all(item.get("status") == "done" for item in takes
+                            and all(item.get("status") == "done" for item in wanted_takes(takes)
                                     if item not in remaining))
             sing_all = {"jobId": parent_id, "result": "too_late" if too_late else "stopping"}
         for job_id, job in await asyncio.to_thread(

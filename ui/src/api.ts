@@ -1434,8 +1434,36 @@ export type SingAllQuoteResponse = SingAllQuote | SingAllQuoteBlocked;
 export const isSingAllQuote = (response: SingAllQuoteResponse): response is SingAllQuote =>
   "quoteId" in response && typeof response.quoteId === "string";
 
-export type SingAllItemStatus = "queued" | "running" | "done" | "failed" | "stopped";
-export type SingAllStatus = "running" | "completed" | "partial" | "failed" | "cancelled";
+export type SingAllItemStatus = "queued" | "running" | "done" | "failed" | "stopped" | "skipped";
+export type SingAllStatus = "running" | "needs_decision" | "completed" | "partial" | "failed" | "cancelled";
+
+/** A paused job's question (docs/specs/sing-all-failures-step6-spec.md, "API"). */
+export type SingAllDecision = {
+  pause: number;
+  stage: "splitting" | "solfege";
+  deadline: string;
+  parts: Array<{
+    sourcePartId: string;
+    name: string;
+    state: "review" | "failed";
+    reason: "split_review" | "split_failed" | "parts_changed" | "solfege_failed";
+    /** The split's own explanation; null for solfège. */
+    message: string | null;
+    madeParts: string[];
+    rows: number;
+    heldCredits: number;
+  }>;
+  /** Everything not paused: the other rows' takes, the instrumentals and the mixes. */
+  keep: { rows: number; heldCredits: number };
+};
+
+export type SingAllRetryQuote = {
+  jobId: string;
+  takes: Array<{ rowId: string; name: string; mode: SingAllTakeMode; voiceName: string; credits: number }>;
+  instrumentals: number;
+  mixes: null | { files: number; credits: number; included: boolean };
+  total: number;
+};
 export type SingAllStage = "reading" | "splitting" | "solfege" | "singing" | "packaging" | "done";
 
 export type SingAllProgress = {
@@ -1448,6 +1476,12 @@ export type SingAllProgress = {
   cancelRequested: boolean;
   /** The owner gets an email when the job ends (step 5); absent from older backends. */
   emailOnEnd?: boolean;
+  /** Non-null only while the job is paused (status needs_decision); absent before step 6. */
+  decision?: SingAllDecision | null;
+  /** A take failed while singing and the job hasn't been retried. */
+  retryable?: boolean;
+  retryOf?: string | null;
+  retriedBy?: string | null;
   choices: {
     language: string;
     solfegeOnly: boolean;
@@ -1459,7 +1493,7 @@ export type SingAllProgress = {
   };
   counts: {
     splits: { done: number; total: number };
-    takes: { done: number; failed: number; total: number };
+    takes: { done: number; failed: number; total: number; skipped?: number };
   };
   rows: Array<{
     rowId: string;
@@ -1467,7 +1501,13 @@ export type SingAllProgress = {
     voice: string;
     voiceName: string;
     split: boolean;
-    takes: Array<{ mode: SingAllTakeMode; status: SingAllItemStatus; reason: string | null }>;
+    takes: Array<{
+      mode: SingAllTakeMode;
+      status: SingAllItemStatus;
+      reason: string | null;
+      /** A retry job's take sung by an earlier job. */
+      carried?: true;
+    }>;
   }>;
   credits: { reserved: number; charged: number; refunded: number };
   receipt: Array<{
@@ -1477,7 +1517,7 @@ export type SingAllProgress = {
     mode: SingAllTakeMode | null;
     name: string | null;
     credits: number;
-    outcome: "charged" | "refunded" | "included";
+    outcome: "charged" | "refunded" | "included" | "earlier";
     reason: string | null;
     /** The number of mix files on a "mixes" row, else null. */
     files?: number | null;
@@ -1522,6 +1562,31 @@ export async function fetchActiveSingAll(): Promise<SingAllProgress | null> {
 
 export async function fetchSingAllJob(jobId: string): Promise<SingAllProgress> {
   return request(`/sing-all/jobs/${encodeURIComponent(jobId)}`, { method: "GET" });
+}
+
+/** Answer a paused job: go on with what can be sung (accepting these review splits), or cancel. */
+export async function answerSingAllDecision(
+  jobId: string,
+  answer: { action: "cancel" } | { action: "continue"; accept: string[]; heldCredits: number }
+): Promise<SingAllProgress> {
+  return request(`/sing-all/jobs/${encodeURIComponent(jobId)}/decision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(answer),
+  });
+}
+
+export async function fetchSingAllRetryQuote(jobId: string): Promise<SingAllRetryQuote> {
+  return request(`/sing-all/jobs/${encodeURIComponent(jobId)}/retry`, { method: "GET" });
+}
+
+/** Start the retry; `total` is the mini quote's total the card showed. */
+export async function startSingAllRetry(jobId: string, total: number): Promise<SingAllProgress> {
+  return request(`/sing-all/jobs/${encodeURIComponent(jobId)}/retry`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ total }),
+  });
 }
 
 export type SingAllDownload = { url: string; fileName: string; expiresAt: string };

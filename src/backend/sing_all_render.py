@@ -11,6 +11,7 @@ from typing import Any
 from google.cloud import firestore
 
 from src.backend.firebase_app import get_firestore_client
+from src.backend.sing_all import ENDED_ITEM_STATUSES
 
 
 _ENDED = {"completed", "failed", "cancelled", "stopped"}
@@ -240,7 +241,7 @@ async def run_parent(job_id: str, orchestrator: Any, *, concurrency: int,
         parent = await asyncio.to_thread(sing_all_store.load, job_id)
         missing = [] if not parent else [item for item in parent.get("items") or []
                                          if item["type"] == "take" and item["status"]
-                                         not in {"done", "failed", "stopped"}]
+                                         not in ENDED_ITEM_STATUSES]
         retry = bool(missing and attempt < 2 and parent and parent.get("status") == "running"
                      and not parent.get("cancelRequested"))
         if missing and not retry and attempt >= 2:
@@ -265,7 +266,7 @@ async def fail_remaining(job_id: str, orchestrator: Any) -> None:
             return
         missing = [item for item in parent.get("items") or []
                    if item["type"] == "take" and item["status"]
-                   not in {"done", "failed", "stopped"}]
+                   not in ENDED_ITEM_STATUSES]
         if not missing:
             break
         absent = []
@@ -307,7 +308,7 @@ async def recover_execution(job_id: str, orchestrator: Any, *,
     attempt = int(parent["render"].get("attempt") or 1)
     missing = [item for item in parent.get("items") or []
                if item["type"] == "take" and item["status"]
-               not in {"done", "failed", "stopped"}]
+               not in ENDED_ITEM_STATUSES]
     retry = bool(missing and attempt < 2 and parent.get("status") == "running"
                  and not parent.get("cancelRequested"))
     if missing and attempt >= 2:

@@ -531,3 +531,48 @@
 .sing-all-receipt .sing-all-refunded td {
   color: var(--text-muted);
 }
+
+/* Step 6: the paused card, one block per paused staff. */
+.sing-all-decision {
+  display: grid;
+  gap: 10px;
+}
+
+.sing-all-decision-part {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+}
+
+.sing-all-decision-part p {
+  margin: 0;
+}
+
+.sing-all-why summary {
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.sing-all-why p {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+}
+
+.sing-all-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+/* Retry failed parts: the mini quote. */
+.sing-all-retry {
+  display: grid;
+  gap: 8px;
+}
+
+.sing-all-take-mark.is-skipped {
+  color: var(--text-muted);
+}

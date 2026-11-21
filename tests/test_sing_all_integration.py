@@ -549,7 +549,7 @@ def test_instrumentals_settle_on_first_success_or_refund_if_all_fail(
 
 @pytest.mark.parametrize("split_status,reason", [
     ("failed", "split_failed"),
-    ("completed", "quote_changed"),
+    ("completed", "parts_changed"),
 ])
 def test_stubbed_split_failure_or_wrong_lane_count_refunds_parent(
     parent_environment, split_status, reason,
@@ -606,8 +606,10 @@ def test_stubbed_split_failure_or_wrong_lane_count_refunds_parent(
     asyncio.run(runner.reconcile(job_id))
     asyncio.run(runner.reconcile(job_id))
     finished = sing_all_store.load(job_id)
+    # Step 6: every row came from this split, so it fails with no pause.
     assert finished["status"] == "failed"
-    assert finished["endReason"] == reason
+    assert finished["endReason"] == "split_failed"
+    assert finished["items"][0]["reason"] == reason
     assert finished["stage"] == "done"
     assert all(item["status"] == "failed" for item in finished["items"])
     assert get_or_create_credits(uid, "").reserved == 0
@@ -912,7 +914,8 @@ def test_sing_it_through_four_player_tracks_never_calls_the_model(
                                    ("language", "solfegeOnly", "mode", "verse", "repeats")},
                                  "mixes": "none"}
     assert parent["counts"] == {"splits": {"done": 0, "total": 0},
-                                 "takes": {"done": 0, "failed": 0, "total": 4}}
+                                 "takes": {"done": 0, "failed": 0, "skipped": 0,
+                                           "total": 4}}
     assert len(parent["rows"]) == 4
     assert parent["credits"] == {"reserved": 8, "charged": 0, "refunded": 0}
     assert parent["receipt"] == []

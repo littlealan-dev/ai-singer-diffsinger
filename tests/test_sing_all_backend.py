@@ -303,7 +303,7 @@ def test_sing_it_reserves_then_starts_one_parent_without_model(monkeypatch):
     assert result["status"] == "running" and result["stage"] == "reading"
     assert result["songId"] == "song-a" and result["title"] == "Made-up song"
     assert result["rows"][0]["voiceName"] == "voice_a"
-    assert result["counts"]["takes"] == {"done": 0, "failed": 0, "total": 1}
+    assert result["counts"]["takes"] == {"done": 0, "failed": 0, "skipped": 0, "total": 1}
     assert [event[0] for event in events] == ["reserve", "enqueue"]
 
 

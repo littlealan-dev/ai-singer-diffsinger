@@ -14,7 +14,7 @@ from src.backend.credits import (
 )
 from src.backend.message_catalog import backend_message
 from src.backend.sing_all import (
-    decide, materialize_rows, mark_voice_ranges, summary_with_judged_instruments,
+    ACTIVE_JOB_STATUSES, decide, materialize_rows, wanted_takes, mark_voice_ranges, summary_with_judged_instruments,
 )
 from src.musicxml.solfege import GENERATED_LYRIC_NAME
 
@@ -75,19 +75,19 @@ class SingAllRunner:
         self.orchestrator = orchestrator
 
     async def reconcile(self, job_id: str, *, sweep: bool = False,
-                        now: datetime | None = None) -> None:
-        for _ in range(64):
+                        now: datetime | None = None, max_passes: int = 64) -> None:
+        for _ in range(max_passes):
             job = await asyncio.to_thread(sing_all_store.load, job_id)
             if not job:
                 return
             settings = getattr(self.orchestrator, "_settings", None)
             render_transport = (getattr(settings, "sing_all_singing_transport", "dispatch")
                                 == "render_job")
-            if job.get("status") != "running":
+            if job.get("status") not in ACTIVE_JOB_STATUSES:
                 if render_transport:
                     await self._clear_render_slot(job_id)
                 return
-            if render_transport and sweep:
+            if render_transport and sweep and job["status"] == "running":
                 from src.backend.sing_all_render import recover_execution
                 await recover_execution(
                     job_id, self.orchestrator,
@@ -111,7 +111,8 @@ class SingAllRunner:
                             self.orchestrator._job_store.stop_job, item["childJobId"])
             snapshot = await self.orchestrator._sessions.get_snapshot(
                 job["sessionId"], job["uid"])
-            if (job["stage"] == "splitting"
+            # A split accepted at a pause moves the job on to the solfège stage.
+            if (job["status"] == "running" and job["stage"] in {"splitting", "solfege"}
                     and any(item["type"] == "split" and item["status"] == "done"
                             for item in job.get("items") or [])
                     and self.orchestrator._score_has_review_pending(
@@ -158,8 +159,7 @@ class SingAllRunner:
                                 if reservation_id == action["reservationId"]:
                                     item.update(status="done", reason=None, creditsCharged=charged)
                             if fields.get("stage") == "done":
-                                takes = [item for item in fields["items"]
-                                         if item["type"] == "take"]
+                                takes = wanted_takes(fields["items"])
                                 if job.get("cancelRequested") and all(
                                     item["status"] == "done" for item in takes
                                 ):
@@ -173,32 +173,41 @@ class SingAllRunner:
                     return
             if fields:
                 terminal = fields.get("stage") == "done"
-                email = terminal and self._queues_email(actions)
+                paused = fields.get("status") == "needs_decision"
+                email = (terminal or paused) and self._queues_email(actions)
                 if terminal:
                     fields = {**fields, "finalScoreVersion":
                               (snapshot.get("current_score") or {}).get("version")}
                     written = await asyncio.to_thread(
                         sing_all_store.finish, job_id, fields, expected_stage=job["stage"],
-                        expected_revision=job.get("revision", 0), queue_email=email)
+                        expected_revision=job.get("revision", 0), queue_email=email,
+                        expected_status=job["status"])
                 else:
                     written = await asyncio.to_thread(
                         sing_all_store.apply, job_id, fields, expected_stage=job["stage"],
-                        expected_revision=job.get("revision", 0))
+                        expected_revision=job.get("revision", 0),
+                        expected_status=job["status"], queue_email=email)
                 if not written:
                     continue
                 job = {**job, **fields, "revision": int(job.get("revision", 0)) + 1}
                 if email:
                     await sing_all_mail.send_outbox(
-                        sing_all_mail.outbox_id(job_id, fields["status"]), settings)
+                        sing_all_mail.outbox_id(job_id, fields["status"],
+                                                (fields.get("decision") or {}).get("pause")),
+                        settings)
             for action in actions:
+                # The email was queued with the write above.
+                if action["kind"] == "queue_email":
+                    continue
                 if action not in before and not (fields and fields.get("stage") == "done"
-                                                 and action["kind"] in {"clear_active", "append_end_history",
-                                                                        "queue_email"}):
+                                                 and action["kind"] in {"clear_active", "append_end_history"}):
                     try:
                         await self._action(job, action, snapshot)
                     except SingAllTerminalError as exc:
                         await self._terminal_failure(job_id, exc.reason)
                         return
+            if job.get("status") == "needs_decision":
+                return
             if job.get("status") != "running":
                 if render_transport:
                     await self._clear_render_slot(job_id)
@@ -336,6 +345,20 @@ class SingAllRunner:
             )
         elif kind == "clear_active":
             await asyncio.to_thread(sing_all_store.clear_active, uid, job["jobId"])
+        elif kind == "append_pause_history":
+            decision = job.get("decision") or {}
+            deadline = decision.get("deadline")
+            await self.orchestrator._sessions.append_history(
+                session_id, "assistant",
+                backend_message(
+                    "sing_all.paused_history",
+                    deadline=sing_all_mail.deadline_text(
+                        deadline.isoformat() if isinstance(deadline, datetime) else str(deadline)),
+                    parts="; ".join(backend_message("sing_all.paused_part", name=part["name"],
+                                                    reason=part["reason"])
+                                    for part in decision.get("parts") or [])),
+                sing_all_job_id=job["jobId"],
+            )
         elif kind == "append_end_history":
             takes = [item for item in job["items"] if item["type"] == "take"]
             await self.orchestrator._sessions.append_history(

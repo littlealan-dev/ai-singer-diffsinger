@@ -14,8 +14,9 @@ def _run_job(monkeypatch, job, children):
     def load(_):
         return deepcopy(record)
 
-    def apply(_, fields, *, expected_stage, expected_revision):
-        assert record["status"] == "running"
+    def apply(_, fields, *, expected_stage, expected_revision, expected_status="running",
+              queue_email=False):
+        assert record["status"] == expected_status
         assert (record["stage"], record["revision"]) == (expected_stage, expected_revision)
         events.append(("apply", fields.get("status"), fields.get("stage")))
         record.update(deepcopy(fields))
@@ -24,7 +25,8 @@ def _run_job(monkeypatch, job, children):
 
     monkeypatch.setattr(sing_all_runner.sing_all_store, "load", load)
     monkeypatch.setattr(sing_all_runner.sing_all_store, "apply", apply)
-    def finish(job_id, fields, *, expected_stage, expected_revision, queue_email=False):
+    def finish(job_id, fields, *, expected_stage, expected_revision, queue_email=False,
+               expected_status="running"):
         assert (record["stage"], record["revision"]) == (expected_stage, expected_revision)
         events.append(("finish", fields["status"], fields["stage"]))
         record.update(deepcopy(fields))
@@ -228,7 +230,8 @@ def test_concurrent_reconcile_starts_one_solfege_transform(monkeypatch):
     def load(_job_id):
         return deepcopy(record)
 
-    def apply(_job_id, fields, *, expected_stage, expected_revision):
+    def apply(_job_id, fields, *, expected_stage, expected_revision, expected_status="running",
+              queue_email=False):
         if (record["stage"] != expected_stage
                 or record["revision"] != expected_revision):
             return False

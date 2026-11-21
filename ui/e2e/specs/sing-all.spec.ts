@@ -22,6 +22,14 @@ type Backend = {
   workspaceReads: number;
   history: Json[];
   vocals: Json[];
+  // Step 6: the answers to a pause, and Retry failed parts.
+  decisions: Json[];
+  nextDecision: (answer: Answer) => void;
+  retryStarts: Json[];
+  nextRetryQuote: (answer: Answer) => void;
+  nextRetryStart: (answer: Answer) => void;
+  // Jobs other than the one set with setJob, by id.
+  jobs: Record<string, Json>;
 };
 
 const SONG = "song-1";
@@ -111,6 +119,9 @@ async function mockBackend(page: Page): Promise<Backend> {
   const quoteAnswers: Array<(choices: Json) => Answer> = [];
   const startAnswers: Answer[] = [];
   const downloadAnswers: Answer[] = [];
+  const decisionAnswers: Answer[] = [];
+  const retryQuoteAnswers: Answer[] = [];
+  const retryStartAnswers: Answer[] = [];
   const backend: Backend = {
     quotes: [],
     starts: [],
@@ -125,6 +136,12 @@ async function mockBackend(page: Page): Promise<Backend> {
     workspaceReads: 0,
     history: [],
     vocals: [],
+    decisions: [],
+    nextDecision: (answer) => decisionAnswers.push(answer),
+    retryStarts: [],
+    nextRetryQuote: (answer) => retryQuoteAnswers.push(answer),
+    nextRetryStart: (answer) => retryStartAnswers.push(answer),
+    jobs: {},
   };
   let job: Json | null = null;
   let jobActive = false;
@@ -183,7 +200,32 @@ async function mockBackend(page: Page): Promise<Backend> {
         body: Buffer.from("PK\u0005\u0006" + "\u0000".repeat(18), "binary"),
       });
     }
-    if (at.startsWith("/sing-all/jobs/")) return job ? json(job) : json({ detail: { code: "job_not_found" } }, 404);
+    if (at.endsWith("/decision")) {
+      backend.decisions.push(request.postDataJSON());
+      const answer = decisionAnswers.shift() ?? { body: job ?? {} };
+      if ((answer.status ?? 200) === 200) {
+        backend.setJob(answer.body, { active: ["running", "needs_decision"].includes(String(answer.body.status)) });
+      }
+      return json(answer.body, answer.status ?? 200);
+    }
+    if (at.endsWith("/retry")) {
+      if (request.method() === "GET") {
+        const answer = retryQuoteAnswers.shift() ?? { body: RETRY_QUOTE };
+        return json(answer.body, answer.status ?? 200);
+      }
+      backend.retryStarts.push(request.postDataJSON());
+      const answer = retryStartAnswers.shift() ?? { body: progress({ jobId: "job-2", retryOf: "job-1" }) };
+      if ((answer.status ?? 200) === 200) {
+        if (job) backend.jobs[String(job.jobId)] = { ...job, retryable: false, retriedBy: answer.body.jobId };
+        backend.setJob(answer.body);
+      }
+      return json(answer.body, answer.status ?? 200);
+    }
+    if (at.startsWith("/sing-all/jobs/")) {
+      const id = decodeURIComponent(at.split("/")[3] ?? "");
+      if (backend.jobs[id]) return json(backend.jobs[id]);
+      return job ? json(job) : json({ detail: { code: "job_not_found" } }, 404);
+    }
 
     if (at === `/songs/${SONG}/workspace`) {
       backend.workspaceReads += 1;
@@ -724,4 +766,187 @@ test("the running card says an email will come only when the job will send one",
   await page.reload();
   await expect(card(page)).toContainText("You can close this page. Your song will be here when you come back.");
   await expect(card(page)).not.toContainText("We'll email you");
+});
+
+// Step 6 (docs/specs/sing-all-failures-step6-spec.md): the pause for a decision, and Retry failed parts.
+
+const RETRY_QUOTE = {
+  jobId: "job-1",
+  takes: [{ rowId: "P2", name: "Alto", mode: "lyrics", voiceName: "Voice B", credits: 1 }],
+  instrumentals: 0,
+  mixes: { files: 3, credits: 0, included: true },
+  total: 1,
+};
+
+function pausedJob(overrides: Json = {}): Json {
+  return progress({
+    status: "needs_decision",
+    stage: "splitting",
+    remainingS: null,
+    counts: { splits: { done: 0, total: 2 }, takes: { done: 0, failed: 0, skipped: 0, total: 4 } },
+    credits: { reserved: 9, charged: 0, refunded: 0 },
+    decision: {
+      pause: 1,
+      stage: "splitting",
+      deadline: "2026-01-02T10:00:00Z",
+      parts: [
+        { sourcePartId: "P3", name: "Tenor and Bass", state: "failed", reason: "split_failed",
+          message: "A made-up explanation of why the split failed.", madeParts: [], rows: 2, heldCredits: 4 },
+        { sourcePartId: "P4", name: "Descant", state: "review", reason: "split_review",
+          message: "A made-up note about bars the split wasn't sure of.", madeParts: ["Descant 1"],
+          rows: 1, heldCredits: 2 },
+      ],
+      keep: { rows: 2, heldCredits: 3 },
+    },
+    ...overrides,
+  });
+}
+
+function startedEntry(backend: Backend, jobId = "job-1") {
+  backend.history.push(
+    { id: `turn-${jobId}`, role: "assistant", content: "Sing All started: 4 takes, 9 credits reserved.",
+      timestamp: "2026-01-01T10:00:01Z", singAllJobId: jobId },
+  );
+}
+
+test("a paused job asks for a decision; the review tick box changes what goes on", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-pause-continue");
+  startedEntry(backend);
+  backend.setJob(pausedJob());
+  await goToSong(page);
+  await expect(page.getByTestId("sing-all-pill")).toContainText("Sing All · Action needed");
+  const decision = card(page).getByTestId("sing-all-decision");
+  await expect(card(page)).toContainText("Your song needs a decision");
+  await expect(decision.getByTestId("sing-all-decision-part")).toHaveCount(2);
+  await expect(decision).toContainText("Tenor and Bass · This part couldn't be split.");
+  await expect(decision).toContainText("Descant · The split needs your review.");
+  await expect(decision).toContainText("Parts made: Descant 1");
+  await decision.getByText("Why").first().click();
+  await expect(decision).toContainText("A made-up explanation of why the split failed.");
+  await expect(decision).toContainText("we'll cancel it and refund your credits");
+
+  const sing = decision.getByTestId("sing-all-continue");
+  // "Sing as it is" starts ticked: the two other parts plus the descant.
+  await expect(sing).toHaveText("Sing 3 parts · up to 5 cr");
+  await decision.getByLabel("Sing as it is").uncheck();
+  await expect(sing).toHaveText("Sing 2 parts · up to 3 cr");
+  await decision.getByLabel("Sing as it is").check();
+
+  backend.nextDecision({ body: progress({ stage: "solfege" }) });
+  await sing.click();
+  expect(backend.decisions).toEqual([{ action: "continue", accept: ["P4"], heldCredits: 5 }]);
+  await expect(card(page)).toContainText("Singing your song");
+  await expect(page.getByTestId("sing-all-pill")).not.toContainText("Action needed");
+});
+
+test("cancel ends the paused job, and a changed or closed decision refreshes the card", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-pause-cancel");
+  startedEntry(backend);
+  backend.setJob(pausedJob());
+  await goToSong(page);
+  const decision = card(page).getByTestId("sing-all-decision");
+
+  backend.nextDecision({
+    status: 409,
+    body: { detail: { code: "decision_changed", job: pausedJob({ decision: {
+      ...(pausedJob().decision as Json), keep: { rows: 2, heldCredits: 4 } } }) } },
+  });
+  await decision.getByTestId("sing-all-continue").click();
+  await expect(decision).toContainText("The choice changed. Check it and try again.");
+  await expect(decision.getByTestId("sing-all-continue")).toHaveText("Sing 3 parts · up to 6 cr");
+
+  backend.nextDecision({ body: progress({
+    status: "cancelled", stage: "done", endReason: "decision_cancelled", remainingS: null,
+    endedAt: "2026-01-01T10:06:00Z", credits: { reserved: 0, charged: 0, refunded: 9 } }) });
+  await decision.getByRole("button", { name: "Cancel and refund" }).click();
+  expect(backend.decisions.at(-1)).toEqual({ action: "cancel" });
+  await expect(card(page)).toContainText("You cancelled it. Everything not sung was refunded.");
+  await expect(page.getByTestId("sing-all-pill")).toHaveCount(0);
+});
+
+test("a reload during a pause shows the paused card again", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-pause-reload");
+  startedEntry(backend);
+  backend.setJob(pausedJob());
+  await goToSong(page);
+  await expect(card(page).getByTestId("sing-all-decision")).toBeVisible();
+  await page.reload();
+  await expect(card(page).getByTestId("sing-all-decision")).toBeVisible();
+});
+
+function partialJob(overrides: Json = {}): Json {
+  return progress({
+    status: "partial", stage: "done", remainingS: null, endedAt: "2026-01-01T10:05:00Z",
+    retryable: true, retryOf: null, retriedBy: null,
+    counts: { splits: { done: 0, total: 0 }, takes: { done: 1, failed: 1, skipped: 0, total: 2 } },
+    credits: { reserved: 0, charged: 2, refunded: 1 },
+    receipt: [
+      { itemId: "take:P1:lyrics", type: "take", rowId: "P1", mode: "lyrics", name: "Soprano", credits: 1,
+        outcome: "charged", reason: null, files: null },
+      { itemId: "take:P2:lyrics", type: "take", rowId: "P2", mode: "lyrics", name: "Alto", credits: 1,
+        outcome: "refunded", reason: "take_failed", files: null },
+    ],
+    ...overrides,
+  });
+}
+
+test("Retry failed parts shows the mini quote, starts a new job and links to it", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-retry");
+  startedEntry(backend);
+  backend.setJob(partialJob(), { active: false });
+  await goToSong(page);
+  await card(page).getByTestId("sing-all-retry").click();
+  const panel = card(page).getByTestId("sing-all-retry-panel");
+  await expect(panel).toContainText("Alto · Voice B");
+  await expect(panel).toContainText("Mixes with every part (3 files)");
+  await expect(panel).toContainText("included");
+  await expect(panel).toContainText("Total");
+
+  // The price changed between the quote and Sing it: the new one is shown.
+  backend.nextRetryStart({ status: 409, body: { detail: { code: "quote_changed",
+    quote: { ...RETRY_QUOTE, takes: [{ ...RETRY_QUOTE.takes[0], credits: 2 }], total: 2 } } } });
+  await panel.getByTestId("sing-all-retry-start").click();
+  await expect(panel).toContainText("The price changed, so here is the new quote.");
+  await expect(panel).toContainText("2 cr");
+
+  await panel.getByTestId("sing-all-retry-start").click();
+  expect(backend.retryStarts).toEqual([{ total: 1 }, { total: 2 }]);
+  const retryCard = page.locator('[data-sing-all-job="job-2"]').getByTestId("sing-all-card");
+  await expect(retryCard).toContainText("Singing your song");
+  const original = page.locator('[data-sing-all-job="job-1"]').getByTestId("sing-all-card");
+  await expect(original).toContainText("Retried");
+  await expect(original.getByTestId("sing-all-retry")).toHaveCount(0);
+  await original.getByRole("button", { name: "Open the retry" }).click();
+  await expect(page.locator('[data-sing-all-job="job-2"]')).toHaveClass(/sing-all-linked/);
+});
+
+test("a retry after the score changed says so", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-retry-score-changed");
+  startedEntry(backend);
+  backend.setJob(partialJob(), { active: false });
+  backend.nextRetryQuote({ status: 409, body: { detail: { code: "score_changed" } } });
+  await goToSong(page);
+  await card(page).getByTestId("sing-all-retry").click();
+  await expect(card(page).getByTestId("sing-all-retry-panel")).toContainText(
+    "The score has changed since this job ended, so these takes can't be retried.");
+});
+
+test("a retry job's earlier takes show as sung earlier on the receipt", async ({ page }) => {
+  const backend = await openSong(page, "sing-all-retry-receipt");
+  startedEntry(backend, "job-2");
+  backend.setJob(progress({
+    jobId: "job-2", retryOf: "job-1", status: "completed", stage: "done", remainingS: null,
+    endedAt: "2026-01-01T10:09:00Z",
+    counts: { splits: { done: 0, total: 0 }, takes: { done: 2, failed: 0, skipped: 0, total: 2 } },
+    credits: { reserved: 0, charged: 1, refunded: 0 },
+    receipt: [
+      { itemId: "take:P1:lyrics", type: "take", rowId: "P1", mode: "lyrics", name: "Soprano", credits: 0,
+        outcome: "earlier", reason: null, files: null },
+      { itemId: "take:P2:lyrics", type: "take", rowId: "P2", mode: "lyrics", name: "Alto", credits: 1,
+        outcome: "charged", reason: null, files: null },
+    ],
+  }), { active: false });
+  await goToSong(page);
+  await expect(card(page).locator(".sing-all-receipt")).toContainText("Soprano");
+  await expect(card(page).locator(".sing-all-receipt")).toContainText("sung earlier");
 });

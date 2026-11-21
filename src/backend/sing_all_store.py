@@ -16,6 +16,7 @@ from src.backend.credits import (
 from src.backend.firebase_app import get_firestore_client
 from src.backend.message_catalog import backend_message
 from src.backend.session import _new_history_entry
+from src.backend.sing_all import ACTIVE_JOB_STATUSES, decision_choice, retryable
 
 
 def _answer_ref(db: Any, session_id: str, kind: str) -> Any:
@@ -81,21 +82,30 @@ class _JobReservationGuard:
         self._job = dict(job)
         self._job_ref = db.collection("singAllJobs").document(job["jobId"])
         self._user_ref = db.collection("users").document(job["uid"])
+        # A retry (step 6) marks the job it retries, so that job can't be retried twice.
+        self._original_ref = (db.collection("singAllJobs").document(job["retryOf"])
+                              if job.get("retryOf") else None)
 
     def read(self, transaction: Any) -> str | None:
         if self._job_ref.get(transaction=transaction).exists:
             return "sing_all_already_running"
+        if self._original_ref is not None:
+            original = self._original_ref.get(transaction=transaction).to_dict() or {}
+            if original.get("uid") != self._job["uid"] or not retryable(original):
+                return "not_retryable"
         user = self._user_ref.get(transaction=transaction).to_dict() or {}
         active = user.get("activeSingAllJobId")
         if active:
             active_ref = self._db.collection("singAllJobs").document(active)
             active_job = active_ref.get(transaction=transaction).to_dict() or {}
-            if active_job.get("status") == "running":
+            if active_job.get("status") in ACTIVE_JOB_STATUSES:
                 return "sing_all_already_running"
         return None
 
     def write(self, transaction: Any) -> None:
         transaction.set(self._job_ref, self._job)
+        if self._original_ref is not None:
+            transaction.update(self._original_ref, {"retriedBy": self._job["jobId"]})
         transaction.update(self._user_ref, {"activeSingAllJobId": self._job["jobId"]})
         takes = sum(item["type"] == "take" for item in self._job.get("items") or [])
         message = backend_message(
@@ -115,6 +125,9 @@ def create_job_with_reservations(
     reservations: list[ReservationItem] = []
     for item in job.get("items") or []:
         kind = item.get("type")
+        if item.get("carried") or item.get("included"):
+            # A retry's takes sung earlier, and mixes already paid for: nothing to hold.
+            continue
         if kind == "mixes":
             reservations.append(ReservationItem(
                 job_id=item["reservationId"], estimated_credits=int(item["creditsReserved"]),
@@ -147,9 +160,9 @@ def load(job_id: str) -> dict[str, Any] | None:
 
 
 def running_jobs() -> list[str]:
-    """List parent ids for the scheduler's lost-notification sweep."""
+    """List parent ids for the scheduler's sweep: running ones, and paused ones for their deadline."""
     docs = (get_firestore_client().collection("singAllJobs")
-            .where("status", "==", "running").stream())
+            .where("status", "in", sorted(ACTIVE_JOB_STATUSES)).stream())
     return [doc.id for doc in docs]
 
 
@@ -163,14 +176,15 @@ def settled_credits(reservation_id: str) -> int | None:
 
 
 def active_job_for_song(uid: str, session_id: str) -> dict[str, Any] | None:
-    """Return this Song's running parent, ignoring a stale active pointer."""
+    """Return this Song's running or paused parent, ignoring a stale active pointer."""
     db = get_firestore_client()
     user = db.collection("users").document(uid).get().to_dict() or {}
     job_id = user.get("activeSingAllJobId")
     if not job_id:
         return None
     job = db.collection("singAllJobs").document(job_id).get().to_dict() or {}
-    return job if job.get("status") == "running" and job.get("sessionId") == session_id else None
+    return (job if job.get("status") in ACTIVE_JOB_STATUSES
+            and job.get("sessionId") == session_id else None)
 
 
 def child_allowed(parent_job_id: str, item_id: str, child_job_id: str) -> bool:
@@ -185,15 +199,22 @@ def child_allowed(parent_job_id: str, item_id: str, child_job_id: str) -> bool:
 def apply(
     job_id: str, fields: Mapping[str, Any], *,
     expected_stage: str | None = None, expected_revision: int | None = None,
+    expected_status: str = "running", queue_email: bool = False,
 ) -> bool:
-    """Apply one reconciler decision only against its observed job revision."""
+    """Apply one reconciler decision only against its observed job revision.
+
+    With queue_email, a pause (status needs_decision) writes its email's outbox
+    document in the same transaction.
+    """
+    from src.backend import sing_all_mail
+
     db = get_firestore_client()
     ref = db.collection("singAllJobs").document(job_id)
 
     @firestore.transactional
     def _apply(transaction: Any) -> bool:
         current = ref.get(transaction=transaction).to_dict() or {}
-        if current.get("status") != "running":
+        if current.get("status") != expected_status:
             return False
         if expected_stage is not None and current.get("stage") != expected_stage:
             return False
@@ -202,6 +223,9 @@ def apply(
             return False
         transaction.update(ref, {**fields, "revision": revision + 1,
                                  "updatedAt": datetime.now(timezone.utc)})
+        if queue_email and fields.get("status") == "needs_decision":
+            sing_all_mail.queue_email(transaction, db, {**current, "jobId": job_id},
+                                     "needs_decision", pause=fields["decision"]["pause"])
         return True
 
     try:
@@ -217,6 +241,7 @@ def apply(
 def finish(
     job_id: str, fields: Mapping[str, Any], *,
     expected_stage: str, expected_revision: int, queue_email: bool = False,
+    expected_status: str = "running",
 ) -> bool:
     """End the parent, clear its guard and append its receipt in one transaction.
 
@@ -233,7 +258,7 @@ def finish(
     @firestore.transactional
     def _finish(transaction: Any) -> bool:
         current = job_ref.get(transaction=transaction).to_dict() or {}
-        if (current.get("status") != "running"
+        if (current.get("status") != expected_status
                 or current.get("stage") != expected_stage
                 or int(current.get("revision", 0)) != expected_revision):
             return False
@@ -283,3 +308,44 @@ def clear_active(uid: str, job_id: str) -> None:
             transaction.update(ref, {"activeSingAllJobId": firestore.DELETE_FIELD})
 
     _clear(db.transaction())
+
+
+def answer_decision(
+    job_id: str, uid: str, *, action: str, accept: list[str], held_credits: int | None,
+) -> tuple[str, dict[str, Any] | None]:
+    """Record the owner's answer to a pause; the reconciler carries it out.
+
+    Returns (outcome, job): answered, job_not_found, decision_closed,
+    decision_changed, nothing_to_sing or invalid_decision.
+    """
+    db = get_firestore_client()
+    ref = db.collection("singAllJobs").document(job_id)
+
+    @firestore.transactional
+    def _answer(transaction: Any) -> tuple[str, dict[str, Any] | None]:
+        current = ref.get(transaction=transaction).to_dict()
+        if not current or current.get("uid") != uid:
+            return "job_not_found", None
+        decision = current.get("decision") or {}
+        if current.get("status") != "needs_decision" or decision.get("answer"):
+            return "decision_closed", current
+        answer: dict[str, Any] = {"action": action, "accept": [],
+                                  "answeredAt": datetime.now(timezone.utc)}
+        if action == "continue":
+            review = {part["sourcePartId"] for part in decision.get("parts") or []
+                      if part["state"] == "review"}
+            if held_credits is None or not set(accept) <= review:
+                return "invalid_decision", current
+            choice = decision_choice(current, accept)
+            if not choice["rows"]:
+                return "nothing_to_sing", current
+            if held_credits != choice["heldCredits"]:
+                return "decision_changed", current
+            answer.update(accept=sorted(set(accept)), heldCredits=held_credits)
+        revision = int(current.get("revision", 0)) + 1
+        fields = {"decision": {**decision, "answer": answer}, "revision": revision,
+                  "updatedAt": datetime.now(timezone.utc)}
+        transaction.update(ref, fields)
+        return "answered", {**current, **fields}
+
+    return _answer(db.transaction())

@@ -53,8 +53,9 @@ def test_running_progress_has_contract_fields_and_quote_order(stage, remaining, 
     result = progress(job, now=NOW)
     assert set(result) == {
         "jobId", "songId", "title", "status", "stage", "endReason",
-        "cancelRequested", "emailOnEnd", "choices", "counts", "rows", "credits", "receipt",
-        "notes", "elapsedS", "remainingS", "render", "package", "createdAt", "endedAt",
+        "cancelRequested", "emailOnEnd", "decision", "retryable", "retryOf", "retriedBy",
+        "choices", "counts", "rows", "credits",
+        "receipt", "notes", "elapsedS", "remainingS", "render", "package", "createdAt", "endedAt",
     }
     assert (result["jobId"], result["songId"], result["title"]) == (
         "parent-a", "song-a", "Example Tune")
@@ -69,8 +70,9 @@ def test_running_progress_has_contract_fields_and_quote_order(stage, remaining, 
                                  "mode": "both", "verse": "1", "repeats": False,
                                  "mixes": "none"}
     assert result["package"] is None
+    assert result["decision"] is None
     assert result["counts"] == {"splits": {"done": int(split_done), "total": 1},
-                                 "takes": {"done": 0, "failed": 0, "total": 2}}
+                                 "takes": {"done": 0, "failed": 0, "skipped": 0, "total": 2}}
     assert result["rows"] == [{
         "rowId": "line-a", "name": "Upper", "voice": "voice-a",
         "voiceName": "Voice A", "split": True,
@@ -106,12 +108,13 @@ def test_ended_progress_has_receipt_and_no_remaining_time(status):
     result = progress(job, now=NOW + timedelta(seconds=5))
     assert set(result) == {
         "jobId", "songId", "title", "status", "stage", "endReason",
-        "cancelRequested", "emailOnEnd", "choices", "counts", "rows", "credits", "receipt",
-        "notes", "elapsedS", "remainingS", "render", "package", "createdAt", "endedAt",
+        "cancelRequested", "emailOnEnd", "decision", "retryable", "retryOf", "retriedBy",
+        "choices", "counts", "rows", "credits",
+        "receipt", "notes", "elapsedS", "remainingS", "render", "package", "createdAt", "endedAt",
     }
     assert result["endReason"] == "instrumentals_failed"
     assert result["counts"] == {"splits": {"done": 1, "total": 1},
-                                 "takes": {"done": 1, "failed": 1, "total": 2}}
+                                 "takes": {"done": 1, "failed": 1, "skipped": 0, "total": 2}}
     assert result["credits"] == {"reserved": 0, "charged": 2, "refunded": 4}
     assert result["elapsedS"] == 20
     assert result["remainingS"] is None

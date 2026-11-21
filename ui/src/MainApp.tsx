@@ -1798,6 +1798,7 @@ const SING_ALL_POLL_MS = 3000;
 // The header pill's words for a running Sing All, e.g. "Singing 3/8".
 const singAllPillStage = (job: SingAllProgress): string => {
   if (job.cancelRequested) return "Stopping";
+  if (job.status === "needs_decision") return "Action needed";
   if (job.render.state === "waiting") return "Queued";
   switch (job.stage) {
     case "reading":
@@ -4297,6 +4298,25 @@ export default function MainApp() {
       .catch(() => loadSingAllJob(jobId));
   };
 
+  // Step 6: a paused job answered. Going on keeps it active; a cancel ends it.
+  const handleSingAllJobUpdated = (job: SingAllProgress) => {
+    rememberSingAllJob(job);
+    const active = job.status === "running" || job.status === "needs_decision";
+    setActiveSingAll((current) => (active ? job : current?.jobId === job.jobId ? null : current));
+  };
+
+  // A retry is a new job: its card joins the chat, as the history shows it after a reload.
+  const handleSingAllRetryStarted = (job: SingAllProgress) => {
+    setMessages((current) => [
+      ...current,
+      { id: `sing-all-${job.jobId}`, role: "assistant", content: "", singAllJobId: job.jobId },
+    ]);
+    rememberSingAllJob(job);
+    setActiveSingAll(job);
+    // The retried job now links to this one in place of its Retry button.
+    if (job.retryOf) loadSingAllJob(job.retryOf);
+  };
+
   const handleSingAllStop = async (songId: string) => {
     try {
       const response = await stopSessionWork(songId);
@@ -5944,6 +5964,9 @@ export default function MainApp() {
                     onTopUp={() => openPaywall("insufficient_credits")}
                     onUpgrade={() => openPaywall("billing_menu")}
                     onStop={handleSingAllStop}
+                    onJobUpdated={handleSingAllJobUpdated}
+                    onRetryStarted={handleSingAllRetryStarted}
+                    onOpenJob={(jobId) => navigate(`${location.pathname}?job=${encodeURIComponent(jobId)}`)}
                   />
                 )}
                 {msg.isProgress && !msg.audioUrl && (

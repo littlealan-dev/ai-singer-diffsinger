@@ -129,15 +129,20 @@ def test_ticked_undeclared_part_is_saved_as_vocal_not_midi():
 
 
 def test_split_failure_and_wrong_lanes_refund_every_take():
-    job = _job("splitting")
+    # Step 6: every row came from the one split, so there is nothing to ask: it fails as before.
     for child, reason in [
         ({"status": "failed"}, "split_failed"),
-        ({"status": "completed", "reviewRequired": True, "parts": []}, "split_failed"),
+        ({"status": "completed", "reviewRequired": True, "parts": []}, "parts_changed"),
         ({"status": "completed", "parts": [{"laneKey": "lane-a", "partId": "new-a"}]},
-         "quote_changed"),
+         "parts_changed"),
     ]:
+        job = _job("splitting")
         fields, actions = decide(job, {"split-child": child}, _score(job))
-        assert fields["status"] == "failed" and fields["endReason"] == reason
+        assert fields["items"][0]["status"] == "failed" and actions == []
+        assert fields["items"][0]["reason"] == reason
+        job.update(fields)
+        fields, actions = decide(job, {"split-child": child}, _score(job))
+        assert fields["status"] == "failed" and fields["endReason"] == "split_failed"
         assert len([action for action in actions if action["kind"] == "release"]) == 2
 
 

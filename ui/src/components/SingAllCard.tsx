@@ -2,10 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type SyntheticEvent 
 import clsx from "clsx";
 import {
   ApiError,
+  answerSingAllDecision,
   fetchSingAllDownload,
+  fetchSingAllRetryQuote,
   isSingAllQuote,
   requestSingAllQuote,
   startSingAll,
+  startSingAllRetry,
   type SingAllChoices,
   type SingAllControls,
   type SingAllMixes,
@@ -14,6 +17,7 @@ import {
   type SingAllProgress,
   type SingAllQuote,
   type SingAllQuoteBlocked,
+  type SingAllRetryQuote,
   type SingAllRow,
 } from "../api";
 import "./SingAllCard.css";
@@ -36,6 +40,10 @@ type SingAllCardProps = {
   onTopUp: () => void;
   onUpgrade: () => void;
   onStop: (songId: string) => Promise<void>;
+  // Step 6: a decision or retry answered with fresh progress, a retry started, a job opened by id.
+  onJobUpdated?: (job: SingAllProgress) => void;
+  onRetryStarted?: (job: SingAllProgress) => void;
+  onOpenJob?: (jobId: string) => void;
 };
 
 const MODE_LABEL: Record<SingAllMode, string> = { lyrics: "Lyrics", solfege: "Solfège", both: "Both" };
@@ -788,6 +796,7 @@ function SingAllQuoteView({
 
 const STATUS_HEADLINE: Record<SingAllProgress["status"], string> = {
   running: "Singing your song",
+  needs_decision: "Your song needs a decision",
   completed: "Done: every part is sung",
   partial: "Done, but some parts couldn't be sung",
   failed: "It couldn't be sung",
@@ -803,9 +812,299 @@ const END_REASON: Record<string, string> = {
   instrumentals_failed: "The instrumentals couldn't be prepared.",
   stopped: "You stopped it.",
   stuck: "It stopped making progress.",
+  decision_cancelled: "You cancelled it. Everything not sung was refunded.",
+  decision_timeout: "No choice was made within 24 hours, so it was cancelled and refunded.",
 };
 
-const TAKE_MARK: Record<string, string> = { queued: "·", running: "…", done: "✓", failed: "✗", stopped: "■" };
+const TAKE_MARK: Record<string, string> = {
+  queued: "·",
+  running: "…",
+  done: "✓",
+  failed: "✗",
+  stopped: "■",
+  skipped: "–",
+};
+
+// Why a part is paused (step 6).
+const PAUSE_LINE: Record<string, string> = {
+  split_failed: "This part couldn't be split.",
+  parts_changed: "This part couldn't be split into the parts quoted.",
+  split_review: "The split needs your review.",
+  solfege_failed: "Solfège couldn't be added to this part.",
+};
+
+function deadlineText(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime())
+    ? "the deadline"
+    : date.toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function DecisionPanel({
+  job,
+  onJobUpdated,
+}: {
+  job: SingAllProgress;
+  onJobUpdated?: (job: SingAllProgress) => void;
+}) {
+  const decision = job.decision!;
+  // "Sing as it is" starts ticked: these are the parts the user paid for (spec Q2).
+  const [accepted, setAccepted] = useState<Set<string>>(
+    () => new Set(decision.parts.filter((part) => part.state === "review").map((part) => part.sourcePartId))
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const chosen = decision.parts.filter((part) => part.state === "review" && accepted.has(part.sourcePartId));
+  const rows = decision.keep.rows + chosen.reduce((sum, part) => sum + part.rows, 0);
+  const credits = decision.keep.heldCredits + chosen.reduce((sum, part) => sum + part.heldCredits, 0);
+
+  const answer = async (
+    request: { action: "cancel" } | { action: "continue"; accept: string[]; heldCredits: number }
+  ) => {
+    setBusy(true);
+    setError(null);
+    try {
+      onJobUpdated?.(await answerSingAllDecision(job.jobId, request));
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : undefined;
+      const fresh = err instanceof ApiError ? (err.detail.job as SingAllProgress | undefined) : undefined;
+      if (fresh) onJobUpdated?.(fresh);
+      setError(
+        code === "decision_changed"
+          ? "The choice changed. Check it and try again."
+          : code === "decision_closed"
+            ? "This was already answered."
+            : code === "nothing_to_sing"
+              ? "Choose at least one part to sing."
+              : "Couldn't send your choice. Try again."
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="sing-all-decision" data-testid="sing-all-decision">
+      {decision.parts.map((part) => (
+        <div key={part.sourcePartId} className="sing-all-decision-part" data-testid="sing-all-decision-part">
+          <p>
+            <strong>{part.name}</strong> · {PAUSE_LINE[part.reason] ?? PAUSE_LINE.split_failed}
+          </p>
+          {part.madeParts.length > 0 && (
+            <p className="sing-all-muted">Parts made: {part.madeParts.join(", ")}</p>
+          )}
+          {part.message && (
+            <details className="sing-all-why">
+              <summary>Why</summary>
+              <p>{part.message}</p>
+            </details>
+          )}
+          {part.state === "review" && (
+            <label className="sing-all-check">
+              <input
+                type="checkbox"
+                checked={accepted.has(part.sourcePartId)}
+                onChange={(event) =>
+                  setAccepted((current) => {
+                    const next = new Set(current);
+                    if (event.target.checked) next.add(part.sourcePartId);
+                    else next.delete(part.sourcePartId);
+                    return next;
+                  })
+                }
+              />
+              Sing as it is
+            </label>
+          )}
+        </div>
+      ))}
+      <p className="sing-all-muted">
+        If you don't choose by {deadlineText(decision.deadline)}, we'll cancel it and refund your credits.
+      </p>
+      {error && (
+        <p className="sing-all-warning" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="sing-all-actions">
+        <button
+          type="button"
+          className="sing-all-link"
+          disabled={busy}
+          onClick={() => void answer({ action: "cancel" })}
+        >
+          Cancel and refund
+        </button>
+        <button
+          type="button"
+          className="selection-send"
+          data-testid="sing-all-continue"
+          disabled={busy || rows === 0}
+          onClick={() =>
+            void answer({ action: "continue", accept: chosen.map((part) => part.sourcePartId), heldCredits: credits })
+          }
+        >
+          Sing {rows} part{rows === 1 ? "" : "s"} · up to {credits} cr
+        </button>
+      </div>
+    </div>
+  );
+}
+
+type RetryState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "quote"; quote: SingAllRetryQuote; changed: boolean; starting: boolean }
+  | { kind: "error"; message: string; action?: "top_up" | "upgrade" };
+
+function retryErrorState(err: unknown): RetryState {
+  const code = err instanceof ApiError ? err.code : undefined;
+  switch (code) {
+    case "score_changed":
+      return {
+        kind: "error",
+        message:
+          "The score has changed since this job ended, so these takes can't be retried. Use Sing All for a new quote.",
+      };
+    case "not_retryable":
+      return { kind: "error", message: "These takes can't be retried any more." };
+    case "not_enough_credits":
+      return { kind: "error", message: "You don't have enough credits for the retry.", action: "top_up" };
+    case "free_plan":
+      return { kind: "error", message: "Retrying needs a paid plan.", action: "upgrade" };
+    case "sing_all_already_running":
+      return { kind: "error", message: "Another Sing All is running. Retry when it ends." };
+    default:
+      return { kind: "error", message: "Couldn't retry. Try again." };
+  }
+}
+
+function RetryPanel({
+  job,
+  onRetryStarted,
+  onTopUp,
+  onUpgrade,
+}: {
+  job: SingAllProgress;
+  onRetryStarted?: (job: SingAllProgress) => void;
+  onTopUp: () => void;
+  onUpgrade: () => void;
+}) {
+  const [state, setState] = useState<RetryState>({ kind: "idle" });
+
+  const open = async () => {
+    setState({ kind: "loading" });
+    try {
+      setState({ kind: "quote", quote: await fetchSingAllRetryQuote(job.jobId), changed: false, starting: false });
+    } catch (err) {
+      setState(retryErrorState(err));
+    }
+  };
+
+  const start = async (quote: SingAllRetryQuote) => {
+    setState({ kind: "quote", quote, changed: false, starting: true });
+    try {
+      onRetryStarted?.(await startSingAllRetry(job.jobId, quote.total));
+      setState({ kind: "idle" });
+    } catch (err) {
+      const fresh = err instanceof ApiError ? (err.detail.quote as SingAllRetryQuote | undefined) : undefined;
+      if (err instanceof ApiError && err.code === "quote_changed" && fresh) {
+        setState({ kind: "quote", quote: fresh, changed: true, starting: false });
+      } else {
+        setState(retryErrorState(err));
+      }
+    }
+  };
+
+  if (state.kind === "idle" || state.kind === "loading") {
+    return (
+      <div className="sing-all-actions">
+        <span />
+        <button
+          type="button"
+          className="sing-all-link"
+          data-testid="sing-all-retry"
+          disabled={state.kind === "loading"}
+          onClick={() => void open()}
+        >
+          {state.kind === "loading" ? "Getting the price…" : "Retry failed parts"}
+        </button>
+      </div>
+    );
+  }
+  if (state.kind === "error") {
+    return (
+      <div className="sing-all-retry" data-testid="sing-all-retry-panel">
+        <p className="sing-all-warning" role="alert">
+          {state.message}
+        </p>
+        {state.action && (
+          <div className="sing-all-actions">
+            <span />
+            <button
+              type="button"
+              className="selection-send"
+              onClick={state.action === "top_up" ? onTopUp : onUpgrade}
+            >
+              {state.action === "top_up" ? "Top up" : "Upgrade to sing"}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+  const { quote } = state;
+  return (
+    <div className="sing-all-retry" data-testid="sing-all-retry-panel">
+      {state.changed && <p className="sing-all-notice">The price changed, so here is the new quote.</p>}
+      <table className="sing-all-table">
+        <tbody>
+          {quote.takes.map((take) => (
+            <tr key={`${take.rowId}:${take.mode}`}>
+              <td>
+                {take.name}
+                {take.mode === "solfege" ? " (solfège)" : ""} · {take.voiceName}
+              </td>
+              <td className="sing-all-num">{take.credits} cr</td>
+            </tr>
+          ))}
+          {quote.instrumentals > 0 && (
+            <tr>
+              <td>Instrumentals</td>
+              <td className="sing-all-num">{quote.instrumentals} cr</td>
+            </tr>
+          )}
+          {quote.mixes && (
+            <tr>
+              <td>
+                Mixes with every part ({quote.mixes.files} file{quote.mixes.files === 1 ? "" : "s"})
+              </td>
+              <td className="sing-all-num">{quote.mixes.included ? "included" : `${quote.mixes.credits} cr`}</td>
+            </tr>
+          )}
+          <tr className="sing-all-total">
+            <td>Total</td>
+            <td className="sing-all-num">{quote.total} cr</td>
+          </tr>
+        </tbody>
+      </table>
+      <div className="sing-all-actions">
+        <button type="button" className="sing-all-link" onClick={() => setState({ kind: "idle" })}>
+          Not now
+        </button>
+        <button
+          type="button"
+          className="selection-send"
+          data-testid="sing-all-retry-start"
+          disabled={state.starting}
+          onClick={() => void start(quote)}
+        >
+          Sing it
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function SingAllJobView({
   songTitle,
@@ -813,6 +1112,11 @@ function SingAllJobView({
   job,
   onLoadJob,
   onStop,
+  onTopUp,
+  onUpgrade,
+  onJobUpdated,
+  onRetryStarted,
+  onOpenJob,
 }: SingAllCardProps & { jobId: string }) {
   const [confirmStop, setConfirmStop] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -838,6 +1142,7 @@ function SingAllJobView({
   }
 
   const running = job.status === "running";
+  const paused = job.status === "needs_decision" && Boolean(job.decision);
   const { splits, takes } = job.counts;
   const solfege = job.choices.mode !== "lyrics";
   const stages: Array<{ key: string; label: string; state: "done" | "now" | "later" }> = [];
@@ -943,7 +1248,7 @@ function SingAllJobView({
                 <span
                   key={take.mode}
                   className={clsx("sing-all-take-mark", `is-${take.status}`)}
-                  title={`${MODE_LABEL[take.mode]}: ${take.status}`}
+                  title={`${MODE_LABEL[take.mode]}: ${take.carried ? "sung earlier" : take.status}`}
                 >
                   {job.choices.mode === "both" ? `${MODE_LABEL[take.mode]} ` : ""}
                   {TAKE_MARK[take.status] ?? "·"}
@@ -994,6 +1299,8 @@ function SingAllJobView({
             </div>
           )}
         </>
+      ) : paused ? (
+        <DecisionPanel key={job.decision!.pause} job={job} onJobUpdated={onJobUpdated} />
       ) : (
         <>
           {job.endReason && job.status !== "completed" && (
@@ -1043,9 +1350,11 @@ function SingAllJobView({
                     <td className="sing-all-num">
                       {item.outcome === "included"
                         ? "included"
-                        : item.outcome === "refunded"
-                          ? `${item.credits} cr refunded`
-                          : `${item.credits} cr`}
+                        : item.outcome === "earlier"
+                          ? "sung earlier"
+                          : item.outcome === "refunded"
+                            ? `${item.credits} cr refunded`
+                            : `${item.credits} cr`}
                     </td>
                   </tr>
                 ))}
@@ -1061,6 +1370,16 @@ function SingAllJobView({
               </tbody>
             </table>
           )}
+          {job.retriedBy ? (
+            <div className="sing-all-actions">
+              <span className="sing-all-muted">Retried</span>
+              <button type="button" className="sing-all-link" onClick={() => onOpenJob?.(job.retriedBy as string)}>
+                Open the retry
+              </button>
+            </div>
+          ) : job.retryable ? (
+            <RetryPanel job={job} onRetryStarted={onRetryStarted} onTopUp={onTopUp} onUpgrade={onUpgrade} />
+          ) : null}
         </>
       )}
     </div>
