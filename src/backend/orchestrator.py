@@ -5650,13 +5650,22 @@ class Orchestrator:
         """Return True when default role requested a preprocess-model handoff."""
         return any(call.name == TOOL_START_PREPROCESS_WORKFLOW for call in tool_calls)
 
+    async def _sing_all_blocks_song(self, user_id: str, session_id: str) -> bool:
+        """A Sing All running in this Song blocks edits, except its own split children."""
+        job = await asyncio.to_thread(active_job_for_song, user_id, session_id)
+        if not job:
+            return False
+        context = _preprocess_job_context.get()
+        return not (context is not None and any(
+            item.get("childJobId") == context[0] for item in job.get("items") or []))
+
     async def _sing_all_preprocess_handoff_refusal(
         self, user_id: str, session_id: str,
     ) -> Optional[Dict[str, str]]:
         """Guard workflow handoffs before they bypass the generic tool executor."""
         if self._settings.session_store != "firestore":
             return None
-        if await asyncio.to_thread(active_job_for_song, user_id, session_id):
+        if await self._sing_all_blocks_song(user_id, session_id):
             return {"status": "action_required", "reason": "sing_all_already_running"}
         return None
 
@@ -8788,8 +8797,8 @@ class Orchestrator:
                 TOOL_REPARSE, TOOL_PREPROCESS_VOICE_PARTS, TOOL_PREPARE_SYNTHESIS_QUOTE,
                 TOOL_SYNTHESIZE, TOOL_ADD_SOLFEGE_VERSE, TOOL_MODIFY_SOLFEGE_SETTINGS,
                 TOOL_REPLACE_BIRTHDAY_NAME,
-            } and self._settings.session_store == "firestore" and await asyncio.to_thread(
-                active_job_for_song, user_id, session_id):
+            } and self._settings.session_store == "firestore" and await self._sing_all_blocks_song(
+                user_id, session_id):
                 refusal = {"status": "action_required", "reason": "sing_all_already_running"}
                 return ToolExecutionResult(
                     score=current_score,

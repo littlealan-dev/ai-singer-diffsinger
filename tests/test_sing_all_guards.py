@@ -68,6 +68,30 @@ def test_chat_edit_tools_refuse_active_song_and_reach_handler_in_other_song(monk
         _run_tool(orchestrator, "other-song", name)
 
 
+def test_the_running_sing_alls_own_split_passes_and_another_job_is_refused(monkeypatch):
+    """The split child runs preprocess_voice_parts in the Song its parent locks."""
+    orchestrator = _guarded_orchestrator(monkeypatch)
+    monkeypatch.setattr(
+        orchestrator_module, "active_job_for_song",
+        lambda _uid, _session_id: {"status": "running", "items": [
+            {"type": "split", "childJobId": "made-up-own-split"}]},
+    )
+    for job_id, own in (("made-up-own-split", True), ("made-up-other-job", False)):
+        token = orchestrator_module._preprocess_job_context.set((job_id, "made-up-owner"))
+        try:
+            if own:
+                with pytest.raises(_ReachedTool):
+                    _run_tool(orchestrator, "active-song", "preprocess_voice_parts")
+            else:
+                refused = _run_tool(orchestrator, "active-song", "preprocess_voice_parts")
+                assert refused.action_required_payload["reason"] == "sing_all_already_running"
+        finally:
+            orchestrator_module._preprocess_job_context.reset(token)
+    # A chat edit (no preprocess job) in that Song is still refused.
+    refused = _run_tool(orchestrator, "active-song", "preprocess_voice_parts")
+    assert refused.action_required_payload["reason"] == "sing_all_already_running"
+
+
 def _route(path, method):
     return next(route.endpoint for route in main.app.routes
                 if getattr(route, "path", None) == path and method in route.methods)
