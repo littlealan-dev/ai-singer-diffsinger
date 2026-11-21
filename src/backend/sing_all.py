@@ -138,8 +138,14 @@ def job_from_quote(quote: Mapping[str, Any], *, title: str, job_id: str) -> dict
             item["reservationId"] = f"{job_id}-mixes"
     rows = deepcopy(quote["rows"])
     for row in rows:
-        row["partId"] = None if row.get("split") else row.get("sourcePartId")
-        row["name"] = row.get("partName") or row.get("name") or row.get("sourcePartId")
+        if row.get("split"):
+            # The split names the part; until then the row shows its source staff.
+            row["partId"] = None
+            row["name"] = row.get("partName") or row.get("name") or row.get("sourcePartId")
+        else:
+            # Sung as it is, or a part split earlier in this Song: its own id and name.
+            row["partId"] = row.get("partId") or row.get("sourcePartId")
+            row["name"] = row.get("name") or row.get("partName") or row.get("sourcePartId")
     return {
         "jobId": job_id, "uid": quote["uid"], "sessionId": quote["sessionId"],
         "scoreId": quote["scoreId"], "title": title, "kind": "full",

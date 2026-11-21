@@ -50,6 +50,31 @@ def test_quote_becomes_parent_with_fixed_child_and_reservation_ids():
     assert quote["items"][0]["childJobId"] == "split-child"
 
 
+def test_a_part_split_earlier_is_sung_as_its_own_part():
+    """A Song keeps the parts a chat or an earlier Sing All split; the quote reuses them."""
+    source = _job()
+    source["rows"] = [
+        {"rowId": "P_DERIVED_UPPER", "sourcePartId": "P1-Staff1", "partId": "P_DERIVED_UPPER",
+         "partName": "Made-up staff", "name": "Made-up staff - voice part 1 (Derived)",
+         "split": False, "include": True, "voice": "voice-a"},
+        {"rowId": "P2", "sourcePartId": "P2", "partId": "P2", "partName": "Made-up lead",
+         "name": "Made-up lead", "split": False, "include": True, "voice": "voice-b"},
+        {"rowId": "P3:staff1:V1:slot1", "sourcePartId": "P3", "partId": None,
+         "partName": "Made-up lower staff", "name": "Made-up lower staff · voice 1",
+         "split": True, "include": True, "voice": "voice-a"},
+    ]
+    quote = {"quoteId": "fake-quote", "uid": source["uid"], "sessionId": "fake-song",
+             "scoreId": source["scoreId"], "scoreVersion": 2, "choicesHash": "fake-hash",
+             "total": 4, "choices": source["choices"], "judgment": {}, "rows": source["rows"],
+             "items": source["items"]}
+    rows = job_from_quote(quote, title="Example tune", job_id="fake-parent")["rows"]
+    assert [(row["partId"], row["name"]) for row in rows] == [
+        ("P_DERIVED_UPPER", "Made-up staff - voice part 1 (Derived)"),
+        ("P2", "Made-up lead"),
+        (None, "Made-up lower staff"),
+    ]
+
+
 def test_reading_checks_score_and_saves_assignments_before_splitting():
     job = _job()
     fields, actions = decide(job, {}, _score(job))
