@@ -69,3 +69,24 @@ def test_session_store_rejects_unknown_values(monkeypatch):
 
     with pytest.raises(ValueError, match="SESSION_STORE"):
         Settings.from_env()
+
+
+def test_sing_all_emails_default_off_and_need_both_addresses_when_on(monkeypatch):
+    for name in ("SING_ALL_EMAILS", "SING_ALL_EMAIL_FROM", "SING_ALL_EMAIL_REPLY_TO"):
+        monkeypatch.delenv(name, raising=False)
+    assert Settings.from_env().sing_all_emails == "off"
+
+    monkeypatch.setenv("SING_ALL_EMAILS", "on")
+    with pytest.raises(ValueError, match="SING_ALL_EMAIL_FROM"):
+        Settings.from_env()
+    monkeypatch.setenv("SING_ALL_EMAIL_FROM", "songs@example.test")
+    with pytest.raises(ValueError, match="SING_ALL_EMAIL_REPLY_TO"):
+        Settings.from_env()
+    monkeypatch.setenv("SING_ALL_EMAIL_REPLY_TO", "help@example.test")
+    settings = Settings.from_env()
+    assert (settings.sing_all_emails, settings.sing_all_email_from,
+            settings.sing_all_email_reply_to) == ("on", "songs@example.test", "help@example.test")
+
+    monkeypatch.setenv("SING_ALL_EMAILS", "sometimes")
+    with pytest.raises(ValueError, match="SING_ALL_EMAILS"):
+        Settings.from_env()

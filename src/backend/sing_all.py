@@ -151,6 +151,7 @@ def job_from_quote(quote: Mapping[str, Any], *, title: str, job_id: str) -> dict
 def progress(
     job: Mapping[str, Any], *, now: datetime | None = None,
     split_estimate_seconds: int = 240, singing_start_seconds: int = 60,
+    emails_on: bool = False,
 ) -> dict[str, Any]:
     """Present a parent record as the public Sing All progress and receipt."""
     instant = now or datetime.now(timezone.utc)
@@ -226,6 +227,7 @@ def progress(
         "jobId": job["jobId"], "songId": job["sessionId"], "title": job["title"],
         "status": job["status"], "stage": job["stage"], "endReason": reason,
         "cancelRequested": bool(job.get("cancelRequested")),
+        "emailOnEnd": emails_on and bool(job.get("notifyEmail")),
         "choices": {**{key: choices[key] for key in
                        ("language", "solfegeOnly", "mode", "verse", "repeats")},
                     "mixes": choices.get("mixes") or "none"},
@@ -540,7 +542,8 @@ def decide(
                 item["reason"] = reason
                 if release := _release_action(item):
                     actions.append(release)
-        actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
+        actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"},
+                        {"kind": "queue_email"}])
         return {"items": items, "status": status, "stage": "done", "endReason": reason}, actions
 
     def enter_packaging(settled_items: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -631,7 +634,8 @@ def decide(
                     actions.append(release)
             takes = [item for item in items if item["type"] == "take"]
             done = sum(item["status"] == "done" for item in takes)
-            actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"}])
+            actions.extend([{"kind": "clear_active"}, {"kind": "append_end_history"},
+                            {"kind": "queue_email"}])
             return {"items": items, "status": "partial" if done else "failed",
                     "stage": "done", "endReason": "stuck"}, actions
     if job.get("cancelRequested"):

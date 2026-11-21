@@ -86,6 +86,7 @@ from src.backend.sing_all_store import (
     save_judgment, save_quote, save_style,
 )
 from src.backend.sing_all_runner import SingAllRunner
+from src.backend.sing_all_mail import emails_on as sing_all_emails_on, send_unsent as send_unsent_sing_all_emails
 from src.backend.session import (
     FirestoreSessionStore,
     SessionMusicXmlUnavailableError,
@@ -694,6 +695,8 @@ def create_app() -> FastAPI:
         runner = SingAllRunner(request.app.state.orchestrator)
         for job_id in await asyncio.to_thread(running_sing_all_jobs):
             await runner.reconcile(job_id, sweep=True)
+        if sing_all_emails_on(settings):
+            await send_unsent_sing_all_emails(settings)
         return JSONResponse(content={"status": "done"})
 
     @app.post("/internal/synthesis-jobs/{job_id}")
@@ -1443,7 +1446,8 @@ def create_app() -> FastAPI:
         user_record = await asyncio.to_thread(
             lambda: db.collection("users").document(user_id).get().to_dict() or {})
         job = await asyncio.to_thread(_running_sing_all_job, user_id, user_record)
-        return {"job": sing_all_progress(job) if job else None}
+        return {"job": sing_all_progress(job, emails_on=sing_all_emails_on(settings))
+                if job else None}
 
     @app.get("/sing-all/jobs/{job_id}")
     async def get_sing_all_job(job_id: str, request: Request) -> Dict[str, Any]:
@@ -1452,7 +1456,7 @@ def create_app() -> FastAPI:
         job = await asyncio.to_thread(load_sing_all_job, job_id)
         if not job or job.get("uid") != user_id:
             raise HTTPException(status_code=404, detail={"code": "job_not_found"})
-        return sing_all_progress(job)
+        return sing_all_progress(job, emails_on=sing_all_emails_on(settings))
 
     @app.get("/sing-all/jobs/{job_id}/download")
     async def download_sing_all_package(job_id: str, request: Request) -> Dict[str, Any]:
@@ -1656,7 +1660,7 @@ def create_app() -> FastAPI:
     @app.post("/sing-all/jobs")
     async def start_sing_all(payload: SingAllJobRequest, request: Request) -> Dict[str, Any]:
         """Start only the caller's still-current quote; no LLM is called here."""
-        user_id = await _get_user_id_or_401(request)
+        user_id, user_email = await _get_user_context_or_401(request)
         db = get_firestore_client()
         quote = await asyncio.to_thread(read_quote, db, payload.quoteId, uid=user_id)
         if quote is None:
@@ -1727,6 +1731,9 @@ def create_app() -> FastAPI:
         job_id = uuid.uuid4().hex
         title = (snapshot.get("song") or {}).get("title") or summary.get("title") or "Song"
         job = job_from_quote(quote, title=title, job_id=job_id)
+        if user_email.strip():
+            # The ended email goes to the address signed in when the job was paid for.
+            job["notifyEmail"] = user_email.strip()
         voice_names = {str(bank["id"]): str(bank.get("name") or bank["id"])
                        for bank in voicebanks}
         for row in job["rows"]:
@@ -1747,7 +1754,7 @@ def create_app() -> FastAPI:
                                   activeSongId=active_job["sessionId"])
             raise HTTPException(status_code=409, detail=detail)
         await orchestrator._enqueue_sing_all_reconcile(job_id)
-        return sing_all_progress(job)
+        return sing_all_progress(job, emails_on=sing_all_emails_on(settings))
 
     @app.get("/sessions/{session_id}/synthesis-estimate")
     async def get_synthesis_estimate(

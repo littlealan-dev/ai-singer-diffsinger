@@ -966,7 +966,11 @@ function SingAllJobView({
             {formatMinutes(job.elapsedS)} so far
             {job.remainingS ? ` · about ${formatMinutes(job.remainingS)} left` : ""}
           </p>
-          <p className="sing-all-muted">You can close this page. Your song will be here when you come back.</p>
+          <p className="sing-all-muted">
+            {job.emailOnEnd
+              ? "You can close this page. We'll email you when it's done."
+              : "You can close this page. Your song will be here when you come back."}
+          </p>
           {job.cancelRequested ? (
             <p className="sing-all-muted">Stopping…</p>
           ) : confirmStop ? (

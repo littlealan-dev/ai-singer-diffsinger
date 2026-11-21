@@ -12,7 +12,7 @@ import {
 import { connect as connectExtendableWavEncoder } from "extendable-media-recorder-wav-encoder";
 import { Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Repeat, Square, Mic, Volume2, VolumeX, GripVertical, Sliders, ListMusic, FilePlus, Pencil, Share2 } from "lucide-react";
 import { createPortal } from "react-dom";
-import { Link, useMatch, useNavigate } from "react-router-dom";
+import { Link, useLocation, useMatch, useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import {
   ApiError,
@@ -4117,6 +4117,29 @@ export default function MainApp() {
     container.scrollTop = container.scrollHeight;
   }, [chatAutoScrollRequest]);
 
+  // An email's job link opens the Song at ?job={jobId}: scroll to that job's card and
+  // highlight it once. If the card isn't in this Song's history, the Song opens as usual.
+  const location = useLocation();
+  const linkedSingAllJob = new URLSearchParams(location.search).get("job");
+  const [highlightedSingAllJob, setHighlightedSingAllJob] = useState<string | null>(null);
+  useEffect(() => {
+    if (!linkedSingAllJob || !routeSongId || currentSong?.id !== routeSongId) return;
+    if (!messages.some((message) => message.singAllJobId === linkedSingAllJob)) return;
+    const card = chatStreamRef.current?.querySelector(
+      `[data-sing-all-job="${CSS.escape(linkedSingAllJob)}"]`,
+    );
+    if (!card) return;
+    shouldAutoScrollRef.current = false;
+    card.scrollIntoView({ block: "center" });
+    setHighlightedSingAllJob(linkedSingAllJob);
+    navigate(location.pathname, { replace: true });
+  }, [linkedSingAllJob, routeSongId, currentSong?.id, messages, navigate, location.pathname]);
+  useEffect(() => {
+    if (!highlightedSingAllJob) return;
+    const timer = window.setTimeout(() => setHighlightedSingAllJob(null), 2500);
+    return () => window.clearTimeout(timer);
+  }, [highlightedSingAllJob]);
+
   const handleChatScroll = () => {
     const container = chatStreamRef.current;
     if (!container) return;
@@ -5806,9 +5829,11 @@ export default function MainApp() {
                   msg.isProgress && "progress-bubble",
                   msg.audioUrl && "audio-bubble",
                   (msg.singAll || msg.singAllJobId) && "sing-all-inline-bubble",
+                  msg.singAllJobId && msg.singAllJobId === highlightedSingAllJob && "sing-all-linked",
                   "reveal"
                 )}
                 style={{ animationDelay: `${index * 40}ms` }}
+                data-sing-all-job={msg.singAllJobId}
               >
                 {msg.role === "assistant" ? (
                   (() => {

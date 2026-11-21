@@ -880,7 +880,8 @@ def test_sing_it_through_four_player_tracks_never_calls_the_model(
             0, result=enqueued.append(job_id)),
         _call_sing_all_judgment=no_model,
     )
-    monkeypatch.setattr(main, "_get_user_id_or_401", lambda _request: asyncio.sleep(0, result=uid))
+    monkeypatch.setattr(main, "_get_user_context_or_401",
+                        lambda _request: asyncio.sleep(0, result=(uid, "owner@example.test")))
     monkeypatch.setattr(main, "_get_snapshot_or_404",
                         lambda *_args: asyncio.sleep(0, result=snapshot))
     monkeypatch.setattr(main, "quote_facts", lambda *_args, **_kwargs: {})
@@ -917,6 +918,9 @@ def test_sing_it_through_four_player_tracks_never_calls_the_model(
     assert parent["receipt"] == []
     assert enqueued == [parent["jobId"]]
     assert get_or_create_credits(uid, "").reserved == 8
+    # The ended email goes to the address signed in at "Sing it"; it never reaches the client.
+    assert sing_all_store.load(parent["jobId"])["notifyEmail"] == "owner@example.test"
+    assert "notifyEmail" not in parent and parent["emailOnEnd"] is False
     asyncio.run(SingAllRunner(orchestrator).reconcile(parent["jobId"]))
     finished = sing_all_store.load(parent["jobId"])
     assert finished["status"] == "completed"

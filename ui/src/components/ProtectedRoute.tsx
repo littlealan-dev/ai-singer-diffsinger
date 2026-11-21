@@ -39,9 +39,13 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
             ? `${window.location.pathname}${window.location.search}${window.location.hash}`
             : "/app";
 
-    // A signed-out visitor to a Song's address signs in here and stays on it.
+    // A signed-out visitor to a Song's address, or to a job link from an email,
+    // signs in here and stays on it.
     const isSongAddress =
-        typeof window !== "undefined" && window.location.pathname.startsWith("/app/song/");
+        typeof window !== "undefined" && (
+            window.location.pathname.startsWith("/app/song/")
+            || window.location.pathname.startsWith("/jobs/")
+        );
 
     useEffect(() => {
         if (

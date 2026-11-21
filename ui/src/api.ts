@@ -1446,6 +1446,8 @@ export type SingAllProgress = {
   stage: SingAllStage;
   endReason: string | null;
   cancelRequested: boolean;
+  /** The owner gets an email when the job ends (step 5); absent from older backends. */
+  emailOnEnd?: boolean;
   choices: {
     language: string;
     solfegeOnly: boolean;
