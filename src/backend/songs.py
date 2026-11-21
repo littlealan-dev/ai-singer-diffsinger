@@ -124,7 +124,14 @@ def apply_take(player: Dict[str, Any], job_id: str, job: Dict[str, Any]) -> bool
 
 
 def apply_sing_all_opening_balance(player: Dict[str, Any], job: Dict[str, Any]) -> bool:
-    """Apply the package's measured balance to untouched Song mixer defaults."""
+    """Apply the package's balance between the voices to untouched Song mixer defaults.
+
+    The takes are the same WAV files the server mixed, so the gaps between the
+    voices carry over: the voice with the largest gain opens at 1 and the others
+    sit under it. The instruments keep the player's own defaults. The server's
+    instrument gain makes up for FluidSynth's quiet render; the browser plays the
+    instruments with its own synth, at a level nothing measures.
+    """
     if player.get("scoreId") != job.get("scoreId"):
         return False
     balance = ((job.get("package") or {}).get("stats") or {}).get("balance") or {}
@@ -133,12 +140,8 @@ def apply_sing_all_opening_balance(player: Dict[str, Any], job: Dict[str, Any]) 
     if mode not in {"lyrics", "solfege"}:
         return False
     vocals = stats.get("vocals") or []
-    instruments = stats.get("instruments") or {}
     gains = [float(value["gain_db"]) for value in vocals
              if not value.get("dropped") and value.get("gain_db") is not None]
-    instrument_gain = instruments.get("gain_db") if isinstance(instruments, dict) else None
-    if instrument_gain is not None:
-        gains.append(float(instrument_gain))
     if not gains:
         return False
     shift = max(gains)
@@ -156,13 +159,6 @@ def apply_sing_all_opening_balance(player: Dict[str, Any], job: Dict[str, Any]) 
         volume = 10 ** ((float(value["gain_db"]) - shift) / 20)
         if track.get("volume") != volume:
             track["volume"] = volume
-            changed = True
-    bus = player.get("bus") or {}
-    if instrument_gain is not None and bus.get("levelDb", 0.0) == 0.0:
-        level = float(instrument_gain) - shift
-        if bus.get("levelDb") != level:
-            bus["levelDb"] = level
-            player["bus"] = bus
             changed = True
     return changed
 

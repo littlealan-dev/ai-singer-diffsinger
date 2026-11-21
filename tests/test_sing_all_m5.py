@@ -277,7 +277,7 @@ def test_opening_balance_preserves_owner_edits():
                         {"sourceJobId": "c", "volume": 1, "muted": False, "solo": False},
                         {"sourceJobId": "d", "volume": 1, "muted": True, "solo": False}]
     player["bus"]["muted"] = True
-    # shift = the loudest gain (+2): the loudest part plays at 1, the rest under it.
+    # shift = the largest vocal gain (+2): that part plays at 1, the rest under it.
     assert songs.apply_sing_all_opening_balance(player, job)
     assert player["vocals"][0]["volume"] == 1
     assert player["vocals"][1]["volume"] == 0.7
@@ -285,9 +285,32 @@ def test_opening_balance_preserves_owner_edits():
     # A mute the owner set stays, and the volume under it still gets the balance.
     assert player["vocals"][3]["volume"] == pytest.approx(10 ** (-5 / 20))
     assert player["vocals"][3]["muted"] is True
-    assert player["bus"]["levelDb"] == -11
+    # The instruments keep the player's defaults: the server's gain is for FluidSynth's render.
+    assert player["bus"]["levelDb"] == 0.0
     assert player["bus"]["muted"] is True
     assert not songs.apply_sing_all_opening_balance(player, job)
+
+
+def test_opening_balance_ignores_a_quiet_fluidsynth_render():
+    """Amazing Grace's numbers: the server boosted the quiet piano by +9.7 dB.
+
+    Taking the piano as the loudest track opened the voices at 9-29%. The voices'
+    own gaps start from the bass, the voice with the largest gain, at 1.
+    """
+    gains = [-11.64, -9.43, -9.49, -1.01]
+    job = {"scoreId": "score", "items": [
+        {"type": "take", "status": "done", "mode": "lyrics", "childJobId": f"take-{index}"}
+        for index in range(4)],
+        "package": {"stats": {"balance": {"mode": "lyrics", "stats": {
+            "vocals": [{"gain_db": gain, "dropped": False} for gain in gains],
+            "instruments": {"gain_db": 9.71}}}}}}
+    player = songs.empty_player("owner", "score")
+    player["vocals"] = [{"sourceJobId": f"take-{index}", "volume": 1, "muted": False,
+                         "solo": False} for index in range(4)]
+    assert songs.apply_sing_all_opening_balance(player, job)
+    volumes = [round(track["volume"], 2) for track in player["vocals"]]
+    assert volumes == [0.29, 0.38, 0.38, 1.0]
+    assert player["bus"] == songs.empty_player("owner", "score")["bus"]
 
 
 def test_player_store_persists_opening_balance_for_workspace(workspace):
@@ -325,7 +348,7 @@ def test_player_store_persists_opening_balance_for_workspace(workspace):
         assert player["vocals"][0]["volume"] == 0.7
         assert player["vocals"][1]["volume"] == pytest.approx(10 ** (-6 / 20))
         assert player["instruments"][0]["volume"] == 1
-        assert player["bus"]["levelDb"] == -9
+        assert player["bus"]["levelDb"] == 0.0
         revision = player["revision"]
         await store.set_sing_all_opening_balance(session_id, "owner", job)
         assert (await store.get_player(session_id, "owner"))["revision"] == revision
