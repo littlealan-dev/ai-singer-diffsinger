@@ -273,13 +273,14 @@ export const HorizontalScoreRenderer = ({
 
 export type PageScoreRendererProps = {
   scoreData: string;
+  zoomLevel: number;
   onOsmdChange: (osmd: OpenSheetMusicDisplay | null) => void;
   onReady: () => void;
   onRenderError: () => void;
 };
 
 /** The page view (A4 pages fitted to the container's width), for the share page. */
-export const PageScoreRenderer = ({ scoreData, onOsmdChange, onReady, onRenderError }: PageScoreRendererProps) => {
+export const PageScoreRenderer = ({ scoreData, zoomLevel, onOsmdChange, onReady, onRenderError }: PageScoreRendererProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const callbacksRef = useRef({ onOsmdChange, onReady, onRenderError });
   callbacksRef.current = { onOsmdChange, onReady, onRenderError };
@@ -302,7 +303,7 @@ export const PageScoreRenderer = ({ scoreData, onOsmdChange, onReady, onRenderEr
       try {
         await osmd.load(scoreData);
         if (cancelled) return;
-        applyPageLayoutZoom(osmd, 1);
+        applyPageLayoutZoom(osmd, zoomLevel);
         osmd.render();
         preparePagePreviewWrappers(container);
         fitPagePreviewToContainer(container);
@@ -330,7 +331,7 @@ export const PageScoreRenderer = ({ scoreData, onOsmdChange, onReady, onRenderEr
         // A half-rendered OSMD instance may fail to clear.
       }
     };
-  }, [scoreData]);
+  }, [scoreData, zoomLevel]);
 
   return <div ref={containerRef} className="score-surface page-layout" data-testid="score-preview-surface" />;
 };

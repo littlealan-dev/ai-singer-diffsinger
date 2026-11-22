@@ -450,6 +450,19 @@ test("the score opens in page view, switches to horizontal, and the page fits a 
   await expect(score).toHaveClass(/horizontal-layout/);
   await expect(score.locator("svg").first()).toBeVisible();
 
+  // The app's zoom control: steps of 10%, kept when the view switches.
+  await expect(viewer.locator(".zoom-value")).toHaveText("100%");
+  await viewer.getByRole("button", { name: "Zoom in" }).click();
+  await expect(viewer.locator(".zoom-value")).toHaveText("110%");
+  await expect(score.locator("svg").first()).toBeVisible();
+  await viewer.getByRole("button", { name: "Page view" }).click();
+  await expect(viewer.locator(".zoom-value")).toHaveText("110%");
+  await expect(score.locator(".score-page-virtualizer svg").first()).toBeVisible();
+  await viewer.getByRole("button", { name: "Zoom out" }).click();
+  await viewer.getByRole("button", { name: "Zoom out" }).click();
+  await expect(viewer.locator(".zoom-value")).toHaveText("90%");
+  await expect(score.locator(".score-page-virtualizer svg").first()).toBeVisible();
+
   // On a phone the page stays inside the screen; the score scrolls in its own box.
   await viewer.setViewportSize({ width: 375, height: 812 });
   const widths = await viewer.evaluate(() => ({
@@ -460,6 +473,43 @@ test("the score opens in page view, switches to horizontal, and the page fits a 
   expect(widths.left).toBeGreaterThanOrEqual(0);
   expect(widths.page).toBeLessThanOrEqual(widths.screen);
   await expect(score).toHaveCSS("overflow-y", "auto");
+});
+
+test("the parts list shows two parts a row, one on a phone, and folds away", async ({ page, browser }) => {
+  const backend = await createBackend();
+  backend.state.noticeAccepted = true;
+  backend.state.vocals.push(
+    { key: "P1:lyrics", label: "Soprano", mode: "lyrics" },
+    { key: "P2:lyrics", label: "Alto", mode: "lyrics" },
+    { key: "P3:lyrics", label: "Tenor", mode: "lyrics" },
+  );
+  await openSongAsOwner(page, backend, "share-parts");
+  const link = await shareFromTheApp(page);
+
+  const viewer = await openAsViewer(browser, backend, link);
+  const box = async (key: string) => (await row(viewer, key).boundingBox())!;
+  await expect(row(viewer, "P3:lyrics")).toBeVisible();
+  let [soprano, alto, tenor] = [await box("P1:lyrics"), await box("P2:lyrics"), await box("P3:lyrics")];
+  expect(alto.y).toBe(soprano.y);
+  expect(alto.x).toBeGreaterThan(soprano.x);
+  expect(tenor.y).toBeGreaterThan(soprano.y);
+  expect(tenor.x).toBe(soprano.x);
+
+  await viewer.setViewportSize({ width: 375, height: 812 });
+  [soprano, alto] = [await box("P1:lyrics"), await box("P2:lyrics")];
+  expect(alto.y).toBeGreaterThan(soprano.y);
+  expect(alto.x).toBe(soprano.x);
+
+  const toggle = viewer.getByRole("button", { name: /^Parts/ });
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(toggle).toContainText("3 of 3 on");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(viewer.getByTestId(/^share-row-/)).toHaveCount(3);
+  await expect(row(viewer, "P1:lyrics")).toBeHidden();
+  await toggle.click();
+  await expect(row(viewer, "P1:lyrics")).toBeVisible();
+  await viewer.context().close();
 });
 
 test("the owner's mix: a muted part starts off, a soloed one alone starts on, and a reload restores it", async ({ page, browser }) => {

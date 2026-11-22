@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import type { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import { Link, useParams } from "react-router-dom";
-import { Pause, Play, Share2, Square, Volume2 } from "lucide-react";
+import { ChevronDown, Minus, Pause, Play, Plus, Share2, Square, Volume2 } from "lucide-react";
 import { getContext as getToneContext } from "tone";
 import {
   ApiError,
@@ -144,6 +144,7 @@ function SharedSong({ data }: { data: SharePageData }) {
   const pageOsmdRef = useRef<OpenSheetMusicDisplay | null>(null);
   // The page view by default, as in the app.
   const [layout, setLayout] = useState<ScorePreviewLayout>("page");
+  const [zoomLevel, setZoomLevel] = useState(1);
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
   const lookupRef = useRef(createPerformanceMeasureLookup());
@@ -156,6 +157,9 @@ function SharedSong({ data }: { data: SharePageData }) {
   );
   const hasInstrumentRows = rows.instruments.length > 0 && Boolean(data.player.midi_url);
   const anyInstrumentOn = hasInstrumentRows && rows.instruments.some((row) => row.on);
+  const [partsOpen, setPartsOpen] = useState(true);
+  const listedRows = hasInstrumentRows ? [...shownVocalRows, ...rows.instruments] : shownVocalRows;
+  const rowsOn = listedRows.filter((row) => row.on).length;
 
   useEffect(() => {
     let cancelled = false;
@@ -322,6 +326,11 @@ function SharedSong({ data }: { data: SharePageData }) {
     controlsRef.current?.pause();
     setPlaying(false);
   };
+  const handleZoom = (delta: number) => {
+    const next = Math.min(2, Math.max(0.6, zoomLevel + delta));
+    setZoomLevel(Math.round(next * 10) / 10);
+  };
+
   const handleStop = () => {
     playPendingRef.current = false;
     controlsRef.current?.stop();
@@ -429,7 +438,22 @@ function SharedSong({ data }: { data: SharePageData }) {
           </div>
         ) : null}
 
-        <ul className="share-song-rows" aria-label="Parts">
+        <button
+          type="button"
+          className="share-song-parts-toggle"
+          aria-expanded={partsOpen}
+          aria-controls="share-song-rows"
+          onClick={() => setPartsOpen((open) => !open)}
+        >
+          <ChevronDown size={16} aria-hidden="true" className="share-song-parts-chevron" />
+          <span>Parts</span>
+          {listedRows.length ? (
+            <span className="share-song-parts-count">
+              {rowsOn} of {listedRows.length} on
+            </span>
+          ) : null}
+        </button>
+        <ul id="share-song-rows" className="share-song-rows" aria-label="Parts" hidden={!partsOpen}>
           {shownVocalRows.length === 0 ? <li className="share-song-empty">No sung parts yet</li> : null}
           {shownVocalRows.map((row) => (
             <li key={row.key} className="share-song-row" data-testid={`share-row-${row.key}`}>
@@ -472,6 +496,28 @@ function SharedSong({ data }: { data: SharePageData }) {
       </section>
 
       <div className="share-song-score-bar">
+        {/* The app's zoom control: 60–200% in steps of 10%. */}
+        <div className="zoom-controls">
+          <button
+            type="button"
+            className="zoom-button"
+            onClick={() => handleZoom(-0.1)}
+            aria-label="Zoom out"
+            disabled={!scoreXml || Boolean(scoreError)}
+          >
+            <Minus size={16} />
+          </button>
+          <span className="zoom-value">{Math.round(zoomLevel * 100)}%</span>
+          <button
+            type="button"
+            className="zoom-button"
+            onClick={() => handleZoom(0.1)}
+            aria-label="Zoom in"
+            disabled={!scoreXml || Boolean(scoreError)}
+          >
+            <Plus size={16} />
+          </button>
+        </div>
         <div className="score-layout-toggle" role="group" aria-label="Score preview layout">
           {(["page", "horizontal"] as const).map((option) => (
             <button
@@ -499,6 +545,7 @@ function SharedSong({ data }: { data: SharePageData }) {
         {scoreXml && layout === "page" ? (
           <PageScoreRenderer
             scoreData={scoreXml}
+            zoomLevel={zoomLevel}
             onOsmdChange={(osmd) => {
               pageOsmdRef.current = osmd;
               activeMeasureKeyRef.current = null;
@@ -509,7 +556,7 @@ function SharedSong({ data }: { data: SharePageData }) {
         ) : scoreXml ? (
           <HorizontalScoreRenderer
             scoreData={scoreXml}
-            zoomLevel={1}
+            zoomLevel={zoomLevel}
             measuresPerBatch={measuresPerBatch}
             scrollContainerRef={canvasRef}
             onRendererChange={(renderer) => {

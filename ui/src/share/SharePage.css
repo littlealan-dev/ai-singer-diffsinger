@@ -123,13 +123,50 @@
   max-width: 220px;
 }
 
+.share-song-parts-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 4px 0;
+  border: none;
+  background: transparent;
+  color: var(--text-strong);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.share-song-parts-chevron {
+  transition: transform 150ms ease;
+}
+
+.share-song-parts-toggle[aria-expanded="false"] .share-song-parts-chevron {
+  transform: rotate(-90deg);
+}
+
+.share-song-parts-count {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 0.85rem;
+}
+
+/* Two parts per row; a narrow screen falls back to one (see the media query). */
 .share-song-rows {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 16px;
+}
+
+.share-song-rows[hidden] {
+  display: none;
+}
+
+.share-song-empty {
+  grid-column: 1 / -1;
 }
 
 .share-song-row {
@@ -191,6 +228,8 @@
 .share-song-score-bar {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
 }
 
 /* The score scrolls inside its own box, down the pages and across a horizontal system. */
@@ -215,6 +254,10 @@
 
   .share-song-seek {
     min-width: 120px;
+  }
+
+  .share-song-rows {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .share-song-volume input {
