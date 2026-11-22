@@ -654,10 +654,24 @@ test("packaging shows Mixing, then Packing the zip; the ended card downloads the
   // The job set the player to the full mix's balance: the page reads the player again.
   await expect.poll(() => backend.workspaceReads).toBeGreaterThan(readsBefore);
 
+  // The card's button sits under the receipt's Charged row.
+  const charged = (await card(page).locator(".sing-all-receipt .sing-all-total").boundingBox())!;
+  const cardButton = (await card(page).getByTestId("sing-all-download").boundingBox())!;
+  expect(cardButton.y).toBeGreaterThanOrEqual(charged.y + charged.height);
   const download = page.waitForEvent("download");
   await card(page).getByTestId("sing-all-download").click();
   expect((await download).suggestedFilename()).toBe("Test Hymn - Sing All.zip");
   expect(backend.downloads).toBe(1);
+
+  // The same zip from the score bar, left of the zoom control.
+  const scoreBar = page.locator(".score-zoom-group");
+  const barButton = scoreBar.getByTestId("sing-all-download");
+  const zoom = (await scoreBar.locator(".zoom-controls").boundingBox())!;
+  expect((await barButton.boundingBox())!.x).toBeLessThan(zoom.x);
+  const again = page.waitForEvent("download");
+  await barButton.click();
+  expect((await again).suggestedFilename()).toBe("Test Hymn - Sing All.zip");
+  expect(backend.downloads).toBe(2);
 });
 
 test("a failed package says so with no zip; a zip that's gone says it isn't available", async ({ page }) => {
@@ -681,6 +695,7 @@ test("a failed package says so with no zip; a zip that's gone says it isn't avai
   );
   await expect(card(page).locator(".sing-all-receipt")).toContainText("Mixes (3 files)3 cr refunded");
   await expect(card(page).getByTestId("sing-all-download")).toHaveCount(0);
+  await expect(page.locator(".score-zoom-group").getByTestId("sing-all-download")).toHaveCount(0);
 
   backend.setJob(ended({ state: "done", mixes: { done: 3, total: 3 } }), { active: false });
   backend.nextDownload({ status: 409, body: { detail: { code: "zip_unavailable" } } });

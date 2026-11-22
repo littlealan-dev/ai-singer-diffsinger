@@ -91,7 +91,7 @@ import {
 } from "./player/score";
 import { ScorePlayerEngine, withoutKeysOutside, type ScorePlayerPlaybackControls } from "./player/ScorePlayerEngine";
 import CreditsHeader from "./components/CreditsHeader";
-import SingAllCard from "./components/SingAllCard";
+import SingAllCard, { SingAllDownloadButton } from "./components/SingAllCard";
 import { UserMenu } from "./components/UserMenu";
 import SongsDrawer from "./components/SongsDrawer";
 import NewSongOrReplaceModal from "./components/NewSongOrReplaceModal";
@@ -4288,6 +4288,15 @@ export default function MainApp() {
   };
 
   // A retry is a new job: its card joins the chat, as the history shows it after a reload.
+  // The score bar's Download zip: the Song's latest Sing All whose zip was made.
+  const songZipJobId = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const job = messages[index].singAllJobId ? singAllJobs[messages[index].singAllJobId!] : undefined;
+      if (job && job.songId === sessionId && job.package?.state === "done") return job.jobId;
+    }
+    return null;
+  }, [messages, singAllJobs, sessionId]);
+
   const handleSingAllRetryStarted = (job: SingAllProgress) => {
     setMessages((current) => [
       ...current,
@@ -6452,26 +6461,29 @@ export default function MainApp() {
                   </span>
                 )}
               </div>
-              <div className="zoom-controls">
-                <button
-                  type="button"
-                  className="zoom-button"
-                  onClick={() => handleZoom(-0.1)}
-                  aria-label="Zoom out"
-                  disabled={!score || Boolean(scorePreviewError)}
-                >
-                  <Minus size={16} />
-                </button>
-                <span className="zoom-value">{Math.round(zoomLevel * 100)}%</span>
-                <button
-                  type="button"
-                  className="zoom-button"
-                  onClick={() => handleZoom(0.1)}
-                  aria-label="Zoom in"
-                  disabled={!score || Boolean(scorePreviewError)}
-                >
-                  <Plus size={16} />
-                </button>
+              <div className="score-zoom-group">
+                {songZipJobId && <SingAllDownloadButton jobId={songZipJobId} compact />}
+                <div className="zoom-controls">
+                  <button
+                    type="button"
+                    className="zoom-button"
+                    onClick={() => handleZoom(-0.1)}
+                    aria-label="Zoom out"
+                    disabled={!score || Boolean(scorePreviewError)}
+                  >
+                    <Minus size={16} />
+                  </button>
+                  <span className="zoom-value">{Math.round(zoomLevel * 100)}%</span>
+                  <button
+                    type="button"
+                    className="zoom-button"
+                    onClick={() => handleZoom(0.1)}
+                    aria-label="Zoom in"
+                    disabled={!score || Boolean(scorePreviewError)}
+                  >
+                    <Plus size={16} />
+                  </button>
+                </div>
               </div>
               <div className="score-player-transport" aria-label="Score player transport">
                 <button

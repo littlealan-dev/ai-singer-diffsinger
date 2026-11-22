@@ -1118,6 +1118,51 @@ function RetryPanel({
   );
 }
 
+/** The job's zip: on its card, and in the score bar for the Song's latest zip. */
+export function SingAllDownloadButton({ jobId, compact = false }: { jobId: string; compact?: boolean }) {
+  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const download = async () => {
+    setDownloading(true);
+    setError(null);
+    try {
+      const { url } = await fetchSingAllDownload(jobId);
+      window.location.assign(url);
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : undefined;
+      setError(
+        code === "zip_unavailable" || code === "job_not_found"
+          ? "The zip isn't available."
+          : "Couldn't get the zip. Try again."
+      );
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const button = (
+    <button
+      type="button"
+      className="selection-send"
+      data-testid="sing-all-download"
+      disabled={downloading}
+      // The score bar has no room for a message line; the reason shows on hover there.
+      title={compact ? error ?? undefined : undefined}
+      onClick={() => void download()}
+    >
+      {downloading ? "Preparing…" : "Download zip"}
+    </button>
+  );
+  if (compact) return button;
+  return (
+    <>
+      {error ? <p className="sing-all-warning">{error}</p> : <span />}
+      {button}
+    </>
+  );
+}
+
 function SingAllJobView({
   songTitle,
   jobId,
@@ -1132,8 +1177,6 @@ function SingAllJobView({
 }: SingAllCardProps & { jobId: string }) {
   const [confirmStop, setConfirmStop] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const [downloading, setDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!job) onLoadJob(jobId);
@@ -1202,24 +1245,6 @@ function SingAllJobView({
       state: packaging === "now" ? (mixingNow ? "later" : "now") : packaging,
     });
   }
-
-  const download = async () => {
-    setDownloading(true);
-    setDownloadError(null);
-    try {
-      const { url } = await fetchSingAllDownload(job.jobId);
-      window.location.assign(url);
-    } catch (err) {
-      const code = err instanceof ApiError ? err.code : undefined;
-      setDownloadError(
-        code === "zip_unavailable" || code === "job_not_found"
-          ? "The zip isn't available."
-          : "Couldn't get the zip. Try again."
-      );
-    } finally {
-      setDownloading(false);
-    }
-  };
 
   const stop = async () => {
     setStopping(true);
@@ -1325,20 +1350,6 @@ function SingAllJobView({
                 : "The mixes and the zip couldn't be made. The mixes were refunded; your parts are in the player."}
             </p>
           )}
-          {pack?.state === "done" && (
-            <div className="sing-all-actions">
-              {downloadError ? <p className="sing-all-warning">{downloadError}</p> : <span />}
-              <button
-                type="button"
-                className="selection-send"
-                data-testid="sing-all-download"
-                disabled={downloading}
-                onClick={() => void download()}
-              >
-                {downloading ? "Preparing…" : "Download zip"}
-              </button>
-            </div>
-          )}
           {job.receipt.length > 0 && (
             <table className="sing-all-table sing-all-receipt">
               <thead>
@@ -1381,6 +1392,11 @@ function SingAllJobView({
                 </tr>
               </tbody>
             </table>
+          )}
+          {pack?.state === "done" && (
+            <div className="sing-all-actions">
+              <SingAllDownloadButton jobId={job.jobId} />
+            </div>
           )}
           {job.retriedBy ? (
             <div className="sing-all-actions">

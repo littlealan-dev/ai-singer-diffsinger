@@ -960,6 +960,14 @@ body.legal-active #root {
   font-size: 12px;
 }
 
+/* The score bar's zoom area: the Song's Download zip, when there is one, then the zoom. */
+.score-zoom-group {
+  grid-area: zoom;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .zoom-controls {
   grid-area: zoom;
   display: inline-flex;
