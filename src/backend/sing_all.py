@@ -920,6 +920,14 @@ def decide(
                 item.update(status="failed", reason="split_failed",
                             message=child.get("errorMessage") or child.get("message") or None)
                 return {"items": items}, []
+            action_required = child.get("actionRequired")
+            if action_required:
+                # The planner wrote the parts but refused them: its own check failed. That is
+                # the reason to show, not the parts it left without lane ids to match.
+                reason = action_required.get("message") if isinstance(action_required, dict) else None
+                item.update(status="failed", reason="split_failed",
+                            message=reason or child.get("message") or None)
+                return {"items": items}, []
             produced = {str(part["laneKey"]): part for part in child.get("parts") or []}
             affected = [row for row in rows if row.get("sourcePartId") == item["sourcePartId"]
                         and row.get("split")]

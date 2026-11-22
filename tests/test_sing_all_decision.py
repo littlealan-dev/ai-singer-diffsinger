@@ -112,6 +112,19 @@ def test_parts_other_than_quoted_count_as_a_failed_split():
     assert (fields["items"][0]["status"], fields["items"][0]["reason"]) == ("failed", "parts_changed")
 
 
+def test_a_split_the_planner_refused_fails_with_the_planners_reason():
+    """The planner made parts but its own check refused them, so they carry no lane ids:
+    the pause says why the planner refused, not that the parts differ from the quote."""
+    job = _split_job()
+    refused = {"status": "completed", "reviewRequired": True, "parts": [],
+               "message": "Made-up chat summary.",
+               "actionRequired": {"message": "Made-up planner check.", "targets": []}}
+    fields, _ = _step(job, {"split-a": refused})
+    item = fields["items"][0]
+    assert (item["status"], item["reason"], item["message"]) == (
+        "failed", "split_failed", "Made-up planner check.")
+
+
 def test_the_card_numbers_follow_the_review_tick_box():
     job, _, _ = _paused_job()
     # Not paused: the solo take (2), the instrumentals (1) and the mixes (3).
