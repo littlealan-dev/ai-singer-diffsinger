@@ -557,6 +557,7 @@ def test_stubbed_split_failure_or_wrong_lane_count_refunds_parent(
     db, uid, session_id, job_id = parent_environment
     rows = [{
         "rowId": f"P1:staff1:V1:slot{slot}", "sourcePartId": "P1",
+        "laneId": f"dl:p0:source:v1:slot:{slot}",
         "partId": None, "split": True, "voice": "example-voice",
     } for slot in (1, 2)]
     items = [{
@@ -584,7 +585,8 @@ def test_stubbed_split_failure_or_wrong_lane_count_refunds_parent(
             "voice_part_transforms": {"made-up-lane": {
                 "part_index": 0, "target_voice_part_id": "V1",
                 "source_part_index": 0, "source_voice_part_id": "V1",
-                "derived_lane": {"slot": 1, "source": {"part_index": 0, "voice_part_id": "V1"}},
+                "derived_lane": {"derived_lane_id": "dl:p0:source:v1:slot:1", "slot": 1,
+                                 "source": {"part_index": 0, "voice_part_id": "V1"}},
                 "appended_part_ref": {"part_index": 1, "part_id": "P2"},
             }},
         }},
@@ -695,6 +697,7 @@ def test_quoted_split_layout_makes_exact_rows_and_completes_takes(parent_environ
     _db, uid, session_id, job_id = parent_environment
     rows = [{
         "rowId": f"P1:staff1:V1:slot{slot}", "sourcePartId": "P1",
+        "laneId": f"dl:p0:source:v1:slot:{slot}",
         "partId": None, "name": f"Quoted line {slot}", "split": True,
         "include": True, "voice": f"example-voice-{slot}",
     } for slot in (1, 2)]
@@ -750,7 +753,8 @@ def test_quoted_split_layout_makes_exact_rows_and_completes_takes(parent_environ
             f"made-up-{slot}": {
                 "part_index": 0, "target_voice_part_id": "V1",
                 "source_part_index": 0, "source_voice_part_id": "V1",
-                "derived_lane": {"slot": slot, "source": {"part_index": 0, "voice_part_id": "V1"}},
+                "derived_lane": {"derived_lane_id": f"dl:p0:source:v1:slot:{slot}", "slot": slot,
+                                 "source": {"part_index": 0, "voice_part_id": "V1"}},
                 "appended_part_ref": {"part_index": slot, "part_id": f"P{slot + 1}"},
             } for slot in (1, 2)
         }

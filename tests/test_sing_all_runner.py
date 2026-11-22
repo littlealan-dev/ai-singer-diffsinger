@@ -246,13 +246,14 @@ def test_completed_split_maps_the_visible_derived_lane_to_quoted_row():
     job = _job([{"itemId": "split:P1", "type": "split", "sourcePartId": "P1",
                 "childJobId": "split-a", "status": "running"}])
     job["rows"] = [{"rowId": "P1:staff1:V1:slot1", "sourcePartId": "P1",
-                    "split": True, "voice": "voice_a"}]
+                    "laneId": "dl:p0:source:v1:slot:1", "split": True, "voice": "voice_a"}]
     state = {"current_score": {"score": {
         "parts": [{"part_id": "P1"}, {"part_id": "P2"}],
         "voice_part_transforms": {"a": {
             "part_index": 0, "target_voice_part_id": "V1",
             "source_part_index": 0, "source_voice_part_id": "V1",
-            "derived_lane": {"slot": 1, "source": {"part_index": 0, "voice_part_id": "V1"}},
+            "derived_lane": {"derived_lane_id": "dl:p0:source:v1:slot:1", "slot": 1,
+                             "source": {"part_index": 0, "voice_part_id": "V1"}},
             "appended_part_ref": {"part_index": 1, "part_id": "P2"},
         }},
     }}, "score_summary": {"parts": [
@@ -276,12 +277,14 @@ def test_a_staff_with_borrowed_lyrics_matches_its_own_rows():
     job = _job([{"itemId": "split:low", "type": "split", "sourcePartId": "P1-Staff2",
                  "childJobId": "split-low", "status": "running"}])
     job["rows"] = [{"rowId": f"P1-Staff2:staff1:voice part {voice}:slot1",
+                    "laneId": f"dl:p1:source:voice-part-{voice}:slot:1",
                     "sourcePartId": "P1-Staff2", "split": True, "voice": "voice_a"}
                    for voice in (1, 2)]
     transforms = {f"low-{voice}": {
         "part_index": 1, "target_voice_part_id": f"voice part {voice}",
         "source_part_index": 0, "source_voice_part_id": "voice part 1",
-        "derived_lane": {"slot": 1, "source": {"part_index": 1,
+        "derived_lane": {"derived_lane_id": f"dl:p1:source:voice-part-{voice}:slot:1",
+                         "slot": 1, "source": {"part_index": 1,
                                                "voice_part_id": f"voice part {voice}"}},
         "appended_part_ref": {"part_index": 1 + voice, "part_id": f"P-low-{voice}"},
     } for voice in (1, 2)}

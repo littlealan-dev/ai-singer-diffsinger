@@ -10,7 +10,7 @@ from music21 import pitch
 from src.api.preprocess_chooser import _evidence_bars
 from src.api.preprocess_evidence import trim_musicxml
 from src.api.preprocess_sheet import _lane_layout_evidence, build_sheet_skeleton
-from src.api.voice_parts import part_needs_split_signal, sheet_lane_counts
+from src.api.voice_parts import derived_lane_id, part_needs_split_signal, sheet_lane_counts
 from src.musicxml.parser import _summarize_weighted_pitch_range
 
 
@@ -128,7 +128,7 @@ def _lane_rows(score: Mapping[str, Any], part: Mapping[str, Any],
                            else ())
         name = (named_lines[len(rows)] if len(rows) < len(named_lines)
                 else f"{part_name} · voice {len(rows) + 1}")
-        rows.append(_row(
+        row = _row(
             part, source_part_id=str(part.get("part_id") or ""), split=True,
             row_id=(f"{lane.part_id}:staff{scope}:"
                     f"{lane.source_voice_part_id}:slot{lane.slot}"), name=name,
@@ -136,7 +136,10 @@ def _lane_rows(score: Mapping[str, Any], part: Mapping[str, Any],
                 score, part_index, scope, lane, rank, shared=shared,
                 rows_in_pool=len(lanes), voice_id=voice_id,
             ),
-        ))
+        )
+        # The planner's own id for the lane this row becomes: the split matches on it.
+        row["laneId"] = derived_lane_id(lane.part_index, lane.source_voice_part_id, lane.slot)
+        rows.append(row)
     return rows
 
 

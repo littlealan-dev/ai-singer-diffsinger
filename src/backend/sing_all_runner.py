@@ -254,7 +254,6 @@ class SingAllRunner:
     async def _children(self, job: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
         children: dict[str, dict[str, Any]] = {}
         score = (snapshot.get("current_score") or {}).get("score") or {}
-        score_parts = score.get("parts") or []
         summary_parts = (snapshot.get("score_summary") or {}).get("parts") or []
         for item in job.get("items") or []:
             child_id = item.get("childJobId")
@@ -267,26 +266,16 @@ class SingAllRunner:
                         for transform in (score.get("voice_part_transforms") or {}).values():
                             if not isinstance(transform, dict):
                                 continue
-                            # The lane names the part it was split from and the voice it took
-                            # out. source_part_index and source_voice_part_id say where its
-                            # lyrics came from, which can be another staff's line.
+                            # A split part is matched by the planner's own lane id, which the
+                            # quote saved on its row (laneId).
                             lane = transform.get("derived_lane") or {}
-                            lane_source = lane.get("source") or {}
-                            source_index = lane_source.get("part_index", transform.get("part_index"))
-                            voice_id = lane_source.get("voice_part_id",
-                                                       transform.get("target_voice_part_id"))
-                            if not isinstance(source_index, int) or source_index >= len(score_parts):
-                                continue
-                            source = score_parts[source_index]
-                            if source.get("part_id") != item["sourcePartId"]:
-                                continue
                             appended = transform.get("appended_part_ref") or {}
-                            if not lane or appended.get("hidden_default_lane"):
+                            lane_id = lane.get("derived_lane_id")
+                            if not lane_id or appended.get("hidden_default_lane"):
                                 continue
-                            suffix = f":{voice_id}:slot{lane.get('slot')}"
                             matching = [row for row in job["rows"]
                                         if row.get("sourcePartId") == item["sourcePartId"]
-                                        and row.get("split") and row["rowId"].endswith(suffix)]
+                                        and row.get("split") and row.get("laneId") == lane_id]
                             if len(matching) != 1:
                                 continue
                             derived_index = appended.get("part_index")

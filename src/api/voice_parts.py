@@ -926,7 +926,7 @@ def _resolve_plan_output_lanes(score: Dict[str, Any], plan: Dict[str, Any]) -> D
                 while slot in slots:
                     slot += 1
             slots.add(slot)
-            lane_id = f"dl:p{part_index}:source:{_lane_id_slug(voice_part_id)}:slot:{slot}"
+            lane_id = derived_lane_id(part_index, voice_part_id, slot)
             resolved_lane = {
                 "derived_lane_id": lane_id,
                 "source": {"part_index": part_index, "voice_part_id": voice_part_id},
@@ -1065,6 +1065,11 @@ def _with_derived_lane_collision_suffix(name: str, reserved_names: set[str]) -> 
 
 def _lane_id_slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "voice"
+
+
+def derived_lane_id(part_index: int, voice_part_id: str, slot: int) -> str:
+    """A split lane's stable id: its source part, its source voice part and its slot."""
+    return f"dl:p{part_index}:source:{_lane_id_slug(voice_part_id)}:slot:{slot}"
 
 
 def validate_voice_part_status(status: str) -> bool:

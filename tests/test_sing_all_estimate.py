@@ -53,6 +53,33 @@ def test_split_rows_use_planner_lanes_and_estimate_ranges(capsys, tmp_path) -> N
     assert "real" in capsys.readouterr().out
 
 
+def test_quote_lane_ids_are_the_planners_on_a_real_two_staff_split(tmp_path) -> None:
+    """Both staves of one choir part: the quote's laneId per row is the derived_lane_id the
+    planner saves when it really splits them, so the runner can match on it."""
+    source = tmp_path / "made-up-satb.xml"
+    shutil.copyfile(_SATB, source)
+    score = parse_score(source)
+    rows = _facts(score)["rows"]
+    assert len(rows) == 4 and all(row["split"] and row["laneId"] for row in rows)
+    assert len({row["laneId"] for row in rows}) == 4
+    for target in [part["part_id"] for part in score["parts"][:2]]:
+        sheet = build_sheet(score, {"target": {"part_id": target}})
+        plan = assemble_plan(sheet, first_option_choices(sheet), score=score)
+        result = preprocess_voice_parts(score, request={"plan": plan})
+        assert result["status"] == "ready", target
+        score = result["score"]
+    records = [value for value in score["voice_part_transforms"].values()
+               if not (value.get("appended_part_ref") or {}).get("hidden_default_lane")]
+    staff_ids = [part["part_id"] for part in score["parts"][:2]]
+    for record in records:
+        lane = record["derived_lane"]
+        matching = [row for row in rows if row["laneId"] == lane["derived_lane_id"]]
+        assert len(matching) == 1, lane["derived_lane_id"]
+        assert matching[0]["sourcePartId"] == staff_ids[lane["source"]["part_index"]]
+    assert {record["derived_lane"]["derived_lane_id"] for record in records} == {
+        row["laneId"] for row in rows}
+
+
 def test_one_line_with_words_needs_no_split() -> None:
     score = _score()
     signal = score["voice_part_signals"]["parts"][0]
