@@ -1852,7 +1852,8 @@ function rebuildChat(messages: WorkspaceMessage[], jobs: WorkspaceJob[]): Rebuil
 
   let turnId: string | null = null;
   let turnStart = 0;
-  // A Sing All job has a started and a finished entry; its card shows at the first.
+  // A Sing All job's entries (started, paused, ended) are context for the chat model; the
+  // chat shows the job's card in their place, once, at the first.
   const singAllShown = new Set<string>();
   messages.forEach((message) => {
     if (message.role === "user") {
@@ -1860,15 +1861,13 @@ function rebuildChat(messages: WorkspaceMessage[], jobs: WorkspaceJob[]): Rebuil
       turnId = message.id;
       turnStart = rebuilt.length;
     }
-    const singAllJobId =
-      message.singAllJobId && !singAllShown.has(message.singAllJobId) ? message.singAllJobId : undefined;
-    if (singAllJobId) singAllShown.add(singAllJobId);
-    rebuilt.push({
-      id: message.id,
-      role: message.role,
-      content: message.content,
-      ...(singAllJobId ? { singAllJobId } : {}),
-    });
+    if (message.singAllJobId) {
+      if (singAllShown.has(message.singAllJobId)) return;
+      singAllShown.add(message.singAllJobId);
+      rebuilt.push({ id: message.id, role: message.role, content: "", singAllJobId: message.singAllJobId });
+      return;
+    }
+    rebuilt.push({ id: message.id, role: message.role, content: message.content });
   });
   closeTurn(turnId, turnStart);
   return { messages: rebuilt, resume, detachedJob };

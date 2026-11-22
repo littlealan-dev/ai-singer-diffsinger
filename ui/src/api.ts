@@ -124,7 +124,8 @@ export type WorkspaceMessage = {
   role: "user" | "assistant";
   content: string;
   timestamp: string;
-  /** On the "Sing All started" and "finished" entries: the card shows at the first one. */
+  /** On a Sing All job's entries (started, paused, ended): the chat shows the job's card once,
+   * at the first, in place of their text, which is context for the chat model. */
   singAllJobId?: string;
 };
 

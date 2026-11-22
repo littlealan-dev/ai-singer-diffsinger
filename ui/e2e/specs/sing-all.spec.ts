@@ -552,6 +552,9 @@ test("a reload shows the card again from the Song's history", async ({ page }) =
   await expect(card(page)).toHaveCount(1);
   await expect(card(page)).toContainText("Done, but some parts couldn't be sung");
   await expect(card(page).locator(".sing-all-receipt")).toContainText("1 cr refunded");
+  // The job's history entries are the chat model's context: the card stands in for them.
+  await expect(page.getByText("Sing All started: 2 parts, 3 credits held.")).toHaveCount(0);
+  await expect(page.getByText("Sing All finished: 1 of 2 parts sung.")).toHaveCount(0);
 });
 
 test("from another Song the pill opens the running job's Song", async ({ page }) => {
