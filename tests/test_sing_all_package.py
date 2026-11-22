@@ -102,7 +102,7 @@ def test_all_mixes_zip_layout_and_progress(monkeypatch, tmp_path):
     assert len(result["files"]) == 9
     assert result["stats"]["rate"] == 44100
     assert len(result["stats"]["mixes"]) == 3
-    assert result["stats"]["balance"]["mode"] == "lyrics"
+    assert [balance["mode"] for balance in result["stats"]["balances"]] == ["lyrics"]
 
 
 def test_full_and_none_mixes_and_silent_instruments(monkeypatch, tmp_path):
@@ -115,10 +115,21 @@ def test_full_and_none_mixes_and_silent_instruments(monkeypatch, tmp_path):
     job, orchestrator, writes, _, _ = _fixture(monkeypatch, tmp_path, mixes="none", instrumental=False)
     asyncio.run(package.run_package("parent", orchestrator))
     assert writes[-1]["mixes"] == {"done": 0, "total": 0}
-    assert writes[-1]["stats"]["balance"]["stats"]
+    assert writes[-1]["stats"]["balances"][0]["stats"]
     with _zip(writes) as archive:
         assert not any("mixes/" in name or "Instrumentals/" in name for name in archive.namelist())
     assert job["choices"]["mixes"] == "none"
+
+
+def test_each_mode_sung_gets_its_own_balance_without_mixes(monkeypatch, tmp_path):
+    job, orchestrator, writes, _, _ = _fixture(monkeypatch, tmp_path, mixes="none")
+    job["choices"]["mode"] = "both"
+    job["items"][1]["mode"] = "solfege"
+    asyncio.run(package.run_package("parent", orchestrator))
+    balances = writes[-1]["stats"]["balances"]
+    assert [balance["mode"] for balance in balances] == ["lyrics", "solfege"]
+    assert [len(balance["stats"]["vocals"]) for balance in balances] == [1, 1]
+    assert "balance" not in writes[-1]["stats"]
 
 
 def test_partial_job_includes_only_done_take(monkeypatch, tmp_path):

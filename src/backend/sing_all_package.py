@@ -214,12 +214,16 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
             package = {"state": "mixing", "mixes": {"done": 0, "total": len(planned)},
                        "startedAt": started, "updatedAt": started}
             await asyncio.to_thread(_package_write, job_id, package)
-            mode = next(value for value in ("lyrics", "solfege")
-                        if any(item["mode"] == value for item, _, _, _ in records))
-            full_vocals = [stem for item, _, _, stem in records if item["mode"] == mode]
             error_code = "mix_failed"
-            _, balance = await asyncio.to_thread(
-                balanced_mix, full_vocals, instruments, FULL_INSTRUMENTS_DB, rate)
+            # The balance between the voices in each mode sung, mixes or not: the Song's
+            # player opens each mode's tracks at it.
+            balances = []
+            for mode in ("lyrics", "solfege"):
+                full_vocals = [stem for item, _, _, stem in records if item["mode"] == mode]
+                if full_vocals:
+                    _, balance = await asyncio.to_thread(
+                        balanced_mix, full_vocals, instruments, FULL_INSTRUMENTS_DB, rate)
+                    balances.append({"mode": mode, "stats": balance})
             mix_outputs: list[tuple[Any, Path]] = []
             mix_stats: list[dict] = []
             for mix in planned:
@@ -305,8 +309,7 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(zip_file.read_bytes())
             package.update(state="done", zipPath=zip_path, files=files,
-                           stats={"rate": rate, "mixes": mix_stats,
-                                  "balance": {"mode": mode, "stats": balance}},
+                           stats={"rate": rate, "mixes": mix_stats, "balances": balances},
                            updatedAt=datetime.now(timezone.utc))
             await asyncio.to_thread(_package_write, job_id, package)
     except Exception as exc:

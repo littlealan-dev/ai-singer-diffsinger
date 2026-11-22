@@ -260,6 +260,7 @@ def test_no_take_done_finishes_without_package():
 
 
 def test_opening_balance_preserves_owner_edits():
+    # A package saved before each mode had its own balance: one `balance`, for its first mode.
     job = {"scoreId": "score", "items": [
         {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "a"},
         {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "b"},
@@ -311,6 +312,43 @@ def test_opening_balance_ignores_a_quiet_fluidsynth_render():
     volumes = [round(track["volume"], 2) for track in player["vocals"]]
     assert volumes == [0.29, 0.38, 0.38, 1.0]
     assert player["bus"] == songs.empty_player("owner", "score")["bus"]
+
+
+def _balance(mode, gains):
+    return {"mode": mode, "stats": {"vocals": [{"gain_db": gain, "dropped": False} for gain in gains]}}
+
+
+def test_opening_balance_sets_each_mode_from_its_own_balance():
+    """Each mode's loudest voice opens at 1, as in that mode's own mix; none stays at the default."""
+    job = {"scoreId": "score", "items": [
+        {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "lyrics-1"},
+        {"type": "take", "status": "done", "mode": "solfege", "childJobId": "solfege-1"},
+        {"type": "take", "status": "done", "mode": "lyrics", "childJobId": "lyrics-2"},
+        {"type": "take", "status": "done", "mode": "solfege", "childJobId": "solfege-2"}],
+        "package": {"stats": {"balances": [_balance("lyrics", [-13.2, -5.1]),
+                                           _balance("solfege", [-13.9, -6.2])]}}}
+    player = songs.empty_player("owner", "score")
+    player["vocals"] = [{"sourceJobId": job_id, "volume": 1, "muted": False, "solo": False}
+                        for job_id in ("lyrics-1", "solfege-1", "lyrics-2", "solfege-2")]
+    assert songs.apply_sing_all_opening_balance(player, job)
+    volumes = {track["sourceJobId"]: track["volume"] for track in player["vocals"]}
+    assert volumes["lyrics-1"] == pytest.approx(10 ** (-8.1 / 20))
+    assert volumes["lyrics-2"] == 1
+    assert volumes["solfege-1"] == pytest.approx(10 ** (-7.7 / 20))
+    assert volumes["solfege-2"] == 1
+    assert not songs.apply_sing_all_opening_balance(player, job)
+
+
+def test_opening_balance_for_solfege_only():
+    job = {"scoreId": "score", "items": [
+        {"type": "take", "status": "done", "mode": "solfege", "childJobId": f"take-{index}"}
+        for index in range(2)],
+        "package": {"stats": {"balances": [_balance("solfege", [-3.0, -9.0])]}}}
+    player = songs.empty_player("owner", "score")
+    player["vocals"] = [{"sourceJobId": f"take-{index}", "volume": 1, "muted": False,
+                         "solo": False} for index in range(2)]
+    assert songs.apply_sing_all_opening_balance(player, job)
+    assert [round(track["volume"], 2) for track in player["vocals"]] == [1.0, 0.5]
 
 
 def test_player_store_persists_opening_balance_for_workspace(workspace):

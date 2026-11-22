@@ -127,14 +127,23 @@ def apply_sing_all_opening_balance(player: Dict[str, Any], job: Dict[str, Any]) 
     """Apply the package's balance between the voices to untouched Song mixer defaults.
 
     The takes are the same WAV files the server mixed, so the gaps between the
-    voices carry over: the voice with the largest gain opens at 1 and the others
-    sit under it. The instruments keep the player's own defaults. The server's
-    instrument gain makes up for FluidSynth's quiet render; the browser plays the
-    instruments with its own synth, at a level nothing measures.
+    voices carry over: in each mode sung, the voice with the largest gain opens
+    at 1 and the others sit under it. The instruments keep the player's own
+    defaults. The server's instrument gain makes up for FluidSynth's quiet render;
+    the browser plays the instruments with its own synth, at a level nothing measures.
     """
     if player.get("scoreId") != job.get("scoreId"):
         return False
-    balance = ((job.get("package") or {}).get("stats") or {}).get("balance") or {}
+    stats = (job.get("package") or {}).get("stats") or {}
+    # A package made before each mode had its own balance saved only the first mode's.
+    balances = stats.get("balances") or [stats.get("balance") or {}]
+    changed = False
+    for balance in balances:
+        changed = _apply_mode_balance(player, job, balance) or changed
+    return changed
+
+
+def _apply_mode_balance(player: Dict[str, Any], job: Dict[str, Any], balance: Dict[str, Any]) -> bool:
     stats = balance.get("stats") or {}
     mode = balance.get("mode")
     if mode not in {"lyrics", "solfege"}:
