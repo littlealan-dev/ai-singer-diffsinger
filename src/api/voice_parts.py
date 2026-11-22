@@ -5542,10 +5542,11 @@ def _finalize_transform_result(
         ).encode("utf-8")
     ).hexdigest()
     transform_id = f"vp:part{part_index}:{target_voice_part_id}:{transform_hash[:12]}"
-    derived_part_id = (
+    derived_part_id = _unused_derived_part_id(
+        score,
         _derived_part_id(hashlib.sha256(derived_lane_id.encode("utf-8")).hexdigest())
         if derived_lane_id
-        else _derived_part_id(transform_hash)
+        else _derived_part_id(transform_hash),
     )
     derived_part_name = str((resolved_lane or {}).get("display_name") or "").strip()
     if not derived_part_name:
@@ -5697,6 +5698,32 @@ def _compute_score_fingerprint(score: Dict[str, Any]) -> str:
 
 def _derived_part_id(transform_hash: str) -> str:
     return f"P_DERIVED_{transform_hash[:10].upper()}"
+
+
+def _unused_derived_part_id(score: Dict[str, Any], base_id: str) -> str:
+    """The id for a new split part: its lane's id, unless another part already has it.
+
+    The id comes from the lane, so splitting the same lane again finds the part this
+    score's split records say it made, and replaces it. A part that already has the id
+    but no record here (one in an uploaded score that SightSinger split before) is a
+    part of its own: the new one takes the next free id, so neither overwrites the other.
+    """
+    transforms = score.get("voice_part_transforms")
+    for transform in (transforms.values() if isinstance(transforms, dict) else []):
+        ref = transform.get("appended_part_ref") if isinstance(transform, dict) else None
+        if isinstance(ref, dict) and ref.get("part_id") == base_id:
+            return base_id
+    taken = {
+        str(part.get(key))
+        for part in score.get("parts") or []
+        if isinstance(part, dict)
+        for key in ("part_id", "raw_part_id")
+        if part.get(key)
+    }
+    candidate, number = base_id, 2
+    while candidate in taken:
+        candidate, number = f"{base_id}_{number}", number + 1
+    return candidate
 
 
 def _build_derived_part_name(

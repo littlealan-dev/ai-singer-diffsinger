@@ -36,13 +36,13 @@ def _part_kind(part: Mapping[str, Any]) -> str:
 def _row(part: Mapping[str, Any], *, source_part_id: str, split: bool = False,
          row_id: str | None = None, name: str | None = None,
          part_id: str | None = None, estimated_range: Mapping[str, Any] | None = None,
-         source_part_name: str | None = None) -> dict[str, Any]:
+         ) -> dict[str, Any]:
     key = row_id or str(part.get("part_id") or "")
     has_words = split or _has_words(part)
     return {
         "rowId": key,
         "sourcePartId": source_part_id,
-        "partName": source_part_name or str(part.get("part_name") or source_part_id),
+        "partName": str(part.get("part_name") or source_part_id),
         "partId": part_id if split else (part_id or key),
         "name": name or str(part.get("part_name") or key),
         "split": split,
@@ -52,29 +52,6 @@ def _row(part: Mapping[str, Any], *, source_part_id: str, split: bool = False,
         "voicePicked": "recommended",
         "pitchRange": dict(estimated_range or part.get("pitch_range") or {}),
     }
-
-
-def _visible_derived_by_source(score: Mapping[str, Any]) -> dict[int, list[int]]:
-    parts = score.get("parts") or []
-    result: dict[int, list[int]] = {}
-    transforms = score.get("voice_part_transforms") or {}
-    if not isinstance(transforms, Mapping):
-        return result
-    for transform in transforms.values():
-        if not isinstance(transform, Mapping):
-            continue
-        appended = transform.get("appended_part_ref")
-        lane = transform.get("derived_lane")
-        if not isinstance(appended, Mapping) or not isinstance(lane, Mapping):
-            continue
-        index = appended.get("part_index")
-        source = lane.get("source")
-        source_index = source.get("part_index") if isinstance(source, Mapping) else None
-        if (appended.get("hidden_default_lane") or not isinstance(index, int)
-                or index < 0 or index >= len(parts) or not isinstance(source_index, int)):
-            continue
-        result.setdefault(source_index, []).append(index)
-    return {key: sorted(set(value)) for key, value in result.items()}
 
 
 def _staff(note: Mapping[str, Any]) -> str:
@@ -156,7 +133,6 @@ def quote_facts(score: Mapping[str, Any], summary: Mapping[str, Any],
         item.get("part_index"): item for item in signals.get("parts") or []
         if isinstance(item, dict)
     }
-    derived = _visible_derived_by_source(score)
     selected_verse = str(score.get("selected_verse_number") or "")
     target_verse = str(verse_number or selected_verse)
     has_lyric_sources = bool(signals.get("has_lyric_sources", True))
@@ -165,8 +141,10 @@ def quote_facts(score: Mapping[str, Any], summary: Mapping[str, Any],
     undecided_parts: list[dict[str, Any]] = []
     instruments: list[dict[str, Any]] = []
     notes: list[str] = []
+    # Every part goes through the same split check below, whatever it is called or
+    # however it came about.
     for index, part in enumerate(summary_parts):
-        if not isinstance(part, dict) or part.get("is_derived_part") or index >= len(score_parts):
+        if not isinstance(part, dict) or index >= len(score_parts):
             continue
         score_part = score_parts[index]
         if not isinstance(score_part, dict) or score_part.get("hidden"):
@@ -180,13 +158,6 @@ def quote_facts(score: Mapping[str, Any], summary: Mapping[str, Any],
                     instruments.append({"partId": part.get("part_id"), "route": route})
             continue
         source_id = str(part.get("part_id") or "")
-        if derived.get(index) and target_verse == selected_verse:
-            for derived_index in derived[index]:
-                if derived_index < len(summary_parts) and isinstance(summary_parts[derived_index], dict):
-                    child = summary_parts[derived_index]
-                    rows.append(_row(child, source_part_id=source_id,
-                                     source_part_name=str(part.get("part_name") or source_id)))
-            continue
         if not part_needs_split_signal(signal_by_index.get(index, {}), has_lyric_sources):
             rows.append(_row(part, source_part_id=source_id))
             continue

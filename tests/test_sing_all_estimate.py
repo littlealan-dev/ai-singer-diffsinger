@@ -80,6 +80,48 @@ def test_quote_lane_ids_are_the_planners_on_a_real_two_staff_split(tmp_path) -> 
         row["laneId"] for row in rows}
 
 
+def _split_both_staves(score):
+    for target in [part["part_id"] for part in score["parts"][:2]]:
+        sheet = build_sheet(score, {"target": {"part_id": target}})
+        plan = assemble_plan(sheet, first_option_choices(sheet), score=score)
+        result = preprocess_voice_parts(score, request={"plan": plan})
+        assert result["status"] == "ready", target
+        score = result["score"]
+    return score, result["modified_musicxml_path"]
+
+
+def test_an_uploaded_split_score_offers_its_parts_and_the_staves_to_split_again(tmp_path) -> None:
+    """A score SightSinger split before, uploaded as a new Song: each single line is a row
+    as it is, and the two-voice staves are offered for splitting as well. Splitting them
+    again makes new parts with ids of their own beside the uploaded ones, in the score
+    record and in the MusicXML alike."""
+    source = tmp_path / "made-up-satb.xml"
+    shutil.copyfile(_SATB, source)
+    _, exported = _split_both_staves(parse_score(source))
+    uploaded = tmp_path / "uploaded-split.xml"
+    shutil.copyfile(exported, uploaded)
+    score = parse_score(uploaded)
+    summary_parts = score["score_summary"]["parts"]
+    assert len(summary_parts) == 6
+
+    rows = _facts(score)["rows"]
+    ready = [row for row in rows if not row["split"]]
+    assert [row["partId"] for row in ready] == [part["part_id"] for part in summary_parts[2:]]
+    assert all(row["hasWords"] for row in ready)
+    assert len([row for row in rows if row["split"]]) == 4
+    assert len({row["rowId"] for row in rows}) == 8
+
+    split, path = _split_both_staves(score)
+    assert len(split["parts"]) == 10
+    resplit = parse_score(path)
+    assert len(resplit["score_summary"]["parts"]) == 10
+    raw_ids = [part.get("raw_part_id") or part["part_id"] for part in resplit["parts"][2:]]
+    assert len(set(raw_ids)) == 8
+    new_ids = [(record["appended_part_ref"] or {})["part_id"]
+               for record in split["voice_part_transforms"].values()]
+    assert len(new_ids) == 4 and all(part_id.endswith("_2") for part_id in new_ids)
+
+
 def test_one_line_with_words_needs_no_split() -> None:
     score = _score()
     signal = score["voice_part_signals"]["parts"][0]
@@ -164,24 +206,26 @@ def test_no_lyrics_prevents_split_and_explains_it() -> None:
     assert facts["notes"] == [f"{score['score_summary']['parts'][0]['part_id']}:cannot_split_without_lyrics"]
 
 
-def test_visible_split_rows_are_reused_only_for_the_loaded_verse() -> None:
+def test_each_part_is_quoted_by_its_own_music_whatever_its_name_or_history() -> None:
+    """A split part goes through the same split check as any other part, with or without
+    the record of the split that made it: here it needs no split, and its staff still does."""
     score = _score()
     original = score["score_summary"]["parts"][0]
     child = deepcopy(original)
-    child.update({"part_index": 1, "part_id": "P_DERIVED_TEST", "part_name": "Upper line",
-                  "is_derived_part": True})
+    child.update({"part_index": 1, "part_id": "P_DERIVED_TEST",
+                  "part_name": "Upper line (Derived)", "is_derived_part": True})
     score["score_summary"]["parts"].append(child)
-    score["parts"].append({"part_id": "P_DERIVED_TEST", "part_name": "Upper line", "notes": []})
+    score["parts"].append({"part_id": "P_DERIVED_TEST", "part_name": "Upper line (Derived)",
+                           "notes": []})
+    without_record = _facts(score)
     score["voice_part_transforms"] = {
         "line": {"derived_lane": {"source": {"part_index": 0}},
                  "appended_part_ref": {"part_index": 1}}
     }
-    same = _facts(score)
-    assert [row["partId"] for row in same["rows"]] == ["P_DERIVED_TEST"]
-    assert same["rows"][0]["split"] is False
-    other = _facts(score, verse="2")
-    assert len(other["rows"]) == 2
-    assert all(row["split"] for row in other["rows"])
+    for facts in (without_record, _facts(score)):
+        assert [row["split"] for row in facts["rows"]] == [True, True, False]
+        line = facts["rows"][2]
+        assert (line["partId"], line["sourcePartId"]) == ("P_DERIVED_TEST", "P_DERIVED_TEST")
 
 
 def test_open_staff_lists_both_planner_layouts_once(monkeypatch) -> None:
