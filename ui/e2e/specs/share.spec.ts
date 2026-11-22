@@ -475,7 +475,7 @@ test("the score opens in page view, switches to horizontal, and the page fits a 
   await expect(score).toHaveCSS("overflow-y", "auto");
 });
 
-test("the parts list shows two parts a row, one on a phone, and folds away", async ({ page, browser }) => {
+test("a laptop puts the tracks left of the score; a portrait screen shows two parts a row, a phone one; the list folds away", async ({ page, browser }) => {
   const backend = await createBackend();
   backend.state.noticeAccepted = true;
   backend.state.vocals.push(
@@ -488,7 +488,28 @@ test("the parts list shows two parts a row, one on a phone, and folds away", asy
 
   const viewer = await openAsViewer(browser, backend, link);
   const box = async (key: string) => (await row(viewer, key).boundingBox())!;
+  const area = async (selector: string) => (await viewer.locator(selector).boundingBox())!;
+
+  // A laptop: the tracks in the left third, one per row; the player bar (with zoom and the
+  // view toggle) above the score in the other two thirds; the page fits the window.
+  await viewer.setViewportSize({ width: 1280, height: 720 });
   await expect(row(viewer, "P3:lyrics")).toBeVisible();
+  const [tracks, controls, score] = [
+    await area(".share-song-tracks"), await area(".share-song-controls"), await area(".share-song-score"),
+  ];
+  expect(tracks.x + tracks.width).toBeLessThanOrEqual(controls.x);
+  expect(Math.round(score.width / tracks.width)).toBe(2);
+  expect(controls.y + controls.height).toBeLessThanOrEqual(score.y);
+  expect(Math.abs(controls.x - score.x)).toBeLessThan(1);
+  for (const name of ["Play", "Stop", "Zoom in", "Page view"]) {
+    const button = (await viewer.getByRole("button", { name, exact: true }).boundingBox())!;
+    expect(button.y).toBeGreaterThanOrEqual(controls.y);
+    expect(button.y + button.height).toBeLessThanOrEqual(controls.y + controls.height);
+  }
+  expect((await box("P2:lyrics")).y).toBeGreaterThan((await box("P1:lyrics")).y);
+  expect(await viewer.evaluate(() => document.body.scrollHeight)).toBeLessThanOrEqual(720);
+
+  await viewer.setViewportSize({ width: 768, height: 1024 });
   let [soprano, alto, tenor] = [await box("P1:lyrics"), await box("P2:lyrics"), await box("P3:lyrics")];
   expect(alto.y).toBe(soprano.y);
   expect(alto.x).toBeGreaterThan(soprano.x);

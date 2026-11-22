@@ -378,196 +378,204 @@ function SharedSong({ data }: { data: SharePageData }) {
         </button>
       </div>
 
-      <section className="share-song-player" aria-label="Player">
-        <div className="share-song-transport">
-          <button
-            type="button"
-            className="score-action-button"
-            onClick={playing ? handlePause : handlePlay}
-            disabled={!canPlay}
-            aria-label={playing ? "Pause" : "Play"}
-            title={playing ? "Pause" : "Play"}
-          >
-            {playing ? <Pause size={16} /> : <Play size={16} />}
-          </button>
-          <button
-            type="button"
-            className="score-action-button"
-            onClick={handleStop}
-            disabled={!controls}
-            aria-label="Stop"
-            title="Stop"
-          >
-            <Square size={15} />
-          </button>
-          <div ref={setSeekBarHost} className="score-player-seek-host share-song-seek" />
-          <label className="share-song-volume">
-            <Volume2 size={15} aria-hidden="true" />
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={volume}
-              aria-label="Volume"
-              onChange={(event) => setVolume(Number(event.target.value))}
-            />
-          </label>
-        </div>
-        {loadingText ? <p className="share-song-status" role="status">{loadingText}</p> : null}
-        {playerError || engineError ? (
-          <p className="share-song-status error" role="alert">{playerError ?? engineError}</p>
-        ) : null}
-
-        {bothModes ? (
-          <div className="solfege-segmented-control vocal-mode-switch" role="group" aria-label="Sung in">
-            {(["lyrics", "solfege"] as const).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                className={modeShown === mode ? "selected" : undefined}
-                aria-pressed={modeShown === mode}
-                onClick={() => {
-                  handleStop();
-                  setModeShown(mode);
-                }}
-              >
-                {mode === "lyrics" ? "Lyrics" : "Solfège"}
-              </button>
-            ))}
-          </div>
-        ) : null}
-
-        <button
-          type="button"
-          className="share-song-parts-toggle"
-          aria-expanded={partsOpen}
-          aria-controls="share-song-rows"
-          onClick={() => setPartsOpen((open) => !open)}
-        >
-          <ChevronDown size={16} aria-hidden="true" className="share-song-parts-chevron" />
-          <span>Parts</span>
-          {listedRows.length ? (
-            <span className="share-song-parts-count">
-              {rowsOn} of {listedRows.length} on
-            </span>
-          ) : null}
-        </button>
-        <ul id="share-song-rows" className="share-song-rows" aria-label="Parts" hidden={!partsOpen}>
-          {shownVocalRows.length === 0 ? <li className="share-song-empty">No sung parts yet</li> : null}
-          {shownVocalRows.map((row) => (
-            <li key={row.key} className="share-song-row" data-testid={`share-row-${row.key}`}>
-              <button
-                type="button"
-                className="share-song-row-switch"
-                aria-pressed={row.on}
-                aria-label={`${row.label}: ${row.on ? "on" : "off"}`}
-                onClick={() => toggleVocal(row.key)}
-              >
-                {row.on ? "On" : "Off"}
-              </button>
-              <span className="share-song-row-label">{row.label}</span>
-              {row.voice_name ? <span className="share-song-row-voice">{row.voice_name}</span> : null}
-            </li>
-          ))}
-          {hasInstrumentRows
-            ? rows.instruments.map((row) => (
-                <li key={row.key} className="share-song-row instrument" data-testid={`share-row-${row.key}`}>
-                  <button
-                    type="button"
-                    className="share-song-row-switch"
-                    aria-pressed={row.on}
-                    aria-label={`${row.label}: ${row.on ? "on" : "off"}`}
-                    onClick={() => toggleInstrument(row.key)}
-                  >
-                    {row.on ? "On" : "Off"}
-                  </button>
-                  <span className="share-song-row-label">{row.label}</span>
-                </li>
-              ))
-            : null}
-        </ul>
-        {data.credits.voices.length ? (
-          <p className="share-song-credits">
-            Voices: {data.credits.voices.join(", ")} ·{" "}
-            <a href="/credits-and-ai-voices">Credits and AI voices</a>
-          </p>
-        ) : null}
-      </section>
-
-      <div className="share-song-score-bar">
-        {/* The app's zoom control: 60–200% in steps of 10%. */}
-        <div className="zoom-controls">
-          <button
-            type="button"
-            className="zoom-button"
-            onClick={() => handleZoom(-0.1)}
-            aria-label="Zoom out"
-            disabled={!scoreXml || Boolean(scoreError)}
-          >
-            <Minus size={16} />
-          </button>
-          <span className="zoom-value">{Math.round(zoomLevel * 100)}%</span>
-          <button
-            type="button"
-            className="zoom-button"
-            onClick={() => handleZoom(0.1)}
-            aria-label="Zoom in"
-            disabled={!scoreXml || Boolean(scoreError)}
-          >
-            <Plus size={16} />
-          </button>
-        </div>
-        <div className="score-layout-toggle" role="group" aria-label="Score preview layout">
-          {(["page", "horizontal"] as const).map((option) => (
+      {/* One layout for both screens: on a landscape screen the tracks take the left third and
+          the controls sit above the score; on a portrait one they stack as a single column. */}
+      <div className="share-song-layout">
+        <section className="share-song-controls" aria-label="Player">
+          <div className="share-song-transport">
             <button
-              key={option}
               type="button"
-              className={clsx("score-layout-option", { selected: layout === option })}
-              aria-pressed={layout === option}
-              aria-label={option === "page" ? "Page view" : "Horizontal view"}
-              title={option === "page" ? "Page view" : "Horizontal view"}
-              disabled={!scoreXml}
-              onClick={() => {
-                activeMeasureKeyRef.current = null;
-                setLayout(option);
-              }}
+              className="score-action-button"
+              onClick={playing ? handlePause : handlePlay}
+              disabled={!canPlay}
+              aria-label={playing ? "Pause" : "Play"}
+              title={playing ? "Pause" : "Play"}
             >
-              {option === "page" ? <PageViewIcon /> : <HorizontalViewIcon />}
+              {playing ? <Pause size={16} /> : <Play size={16} />}
             </button>
-          ))}
+            <button
+              type="button"
+              className="score-action-button"
+              onClick={handleStop}
+              disabled={!controls}
+              aria-label="Stop"
+              title="Stop"
+            >
+              <Square size={15} />
+            </button>
+            <div ref={setSeekBarHost} className="score-player-seek-host share-song-seek" />
+            <label className="share-song-volume">
+              <Volume2 size={15} aria-hidden="true" />
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={volume}
+                aria-label="Volume"
+                onChange={(event) => setVolume(Number(event.target.value))}
+              />
+            </label>
+          </div>
+          <div className="share-song-score-bar">
+            {/* The app's zoom control: 60–200% in steps of 10%. */}
+            <div className="zoom-controls">
+              <button
+                type="button"
+                className="zoom-button"
+                onClick={() => handleZoom(-0.1)}
+                aria-label="Zoom out"
+                disabled={!scoreXml || Boolean(scoreError)}
+              >
+                <Minus size={16} />
+              </button>
+              <span className="zoom-value">{Math.round(zoomLevel * 100)}%</span>
+              <button
+                type="button"
+                className="zoom-button"
+                onClick={() => handleZoom(0.1)}
+                aria-label="Zoom in"
+                disabled={!scoreXml || Boolean(scoreError)}
+              >
+                <Plus size={16} />
+              </button>
+            </div>
+            <div className="score-layout-toggle" role="group" aria-label="Score preview layout">
+              {(["page", "horizontal"] as const).map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  className={clsx("score-layout-option", { selected: layout === option })}
+                  aria-pressed={layout === option}
+                  aria-label={option === "page" ? "Page view" : "Horizontal view"}
+                  title={option === "page" ? "Page view" : "Horizontal view"}
+                  disabled={!scoreXml}
+                  onClick={() => {
+                    activeMeasureKeyRef.current = null;
+                    setLayout(option);
+                  }}
+                >
+                  {option === "page" ? <PageViewIcon /> : <HorizontalViewIcon />}
+                </button>
+              ))}
+            </div>
+          </div>
+          {loadingText || playerError || engineError ? (
+            <div className="share-song-statuses">
+              {loadingText ? <p className="share-song-status" role="status">{loadingText}</p> : null}
+              {playerError || engineError ? (
+                <p className="share-song-status error" role="alert">{playerError ?? engineError}</p>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+        <section className="share-song-tracks" aria-label="Tracks">
+          {bothModes ? (
+            <div className="solfege-segmented-control vocal-mode-switch" role="group" aria-label="Sung in">
+              {(["lyrics", "solfege"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={modeShown === mode ? "selected" : undefined}
+                  aria-pressed={modeShown === mode}
+                  onClick={() => {
+                    handleStop();
+                    setModeShown(mode);
+                  }}
+                >
+                  {mode === "lyrics" ? "Lyrics" : "Solfège"}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          <button
+            type="button"
+            className="share-song-parts-toggle"
+            aria-expanded={partsOpen}
+            aria-controls="share-song-rows"
+            onClick={() => setPartsOpen((open) => !open)}
+          >
+            <ChevronDown size={16} aria-hidden="true" className="share-song-parts-chevron" />
+            <span>Parts</span>
+            {listedRows.length ? (
+              <span className="share-song-parts-count">
+                {rowsOn} of {listedRows.length} on
+              </span>
+            ) : null}
+          </button>
+          <ul id="share-song-rows" className="share-song-rows" aria-label="Parts" hidden={!partsOpen}>
+            {shownVocalRows.length === 0 ? <li className="share-song-empty">No sung parts yet</li> : null}
+            {shownVocalRows.map((row) => (
+              <li key={row.key} className="share-song-row" data-testid={`share-row-${row.key}`}>
+                <button
+                  type="button"
+                  className="share-song-row-switch"
+                  aria-pressed={row.on}
+                  aria-label={`${row.label}: ${row.on ? "on" : "off"}`}
+                  onClick={() => toggleVocal(row.key)}
+                >
+                  {row.on ? "On" : "Off"}
+                </button>
+                <span className="share-song-row-label">{row.label}</span>
+                {row.voice_name ? <span className="share-song-row-voice">{row.voice_name}</span> : null}
+              </li>
+            ))}
+            {hasInstrumentRows
+              ? rows.instruments.map((row) => (
+                  <li key={row.key} className="share-song-row instrument" data-testid={`share-row-${row.key}`}>
+                    <button
+                      type="button"
+                      className="share-song-row-switch"
+                      aria-pressed={row.on}
+                      aria-label={`${row.label}: ${row.on ? "on" : "off"}`}
+                      onClick={() => toggleInstrument(row.key)}
+                    >
+                      {row.on ? "On" : "Off"}
+                    </button>
+                    <span className="share-song-row-label">{row.label}</span>
+                  </li>
+                ))
+              : null}
+          </ul>
+          {data.credits.voices.length ? (
+            <p className="share-song-credits">
+              Voices: {data.credits.voices.join(", ")} ·{" "}
+              <a href="/credits-and-ai-voices">Credits and AI voices</a>
+            </p>
+          ) : null}
+        </section>
+        <div
+          ref={canvasRef}
+          className={clsx("score-canvas share-song-score", { "horizontal-layout": layout === "horizontal" })}
+        >
+          {scoreXml && layout === "page" ? (
+            <PageScoreRenderer
+              scoreData={scoreXml}
+              zoomLevel={zoomLevel}
+              onOsmdChange={(osmd) => {
+                pageOsmdRef.current = osmd;
+                activeMeasureKeyRef.current = null;
+              }}
+              onReady={() => setScoreError(null)}
+              onRenderError={() => setScoreError("Couldn't show the score.")}
+            />
+          ) : scoreXml ? (
+            <HorizontalScoreRenderer
+              scoreData={scoreXml}
+              zoomLevel={zoomLevel}
+              measuresPerBatch={measuresPerBatch}
+              scrollContainerRef={canvasRef}
+              onRendererChange={(renderer) => {
+                rendererRef.current = renderer;
+                activeMeasureKeyRef.current = null;
+              }}
+              onReady={() => setScoreError(null)}
+              onRenderError={() => setScoreError("Couldn't show the score.")}
+            />
+          ) : null}
+          {scoreError ? <p className="share-page-message" role="alert">{scoreError}</p> : null}
         </div>
-      </div>
-      <div
-        ref={canvasRef}
-        className={clsx("score-canvas share-song-score", { "horizontal-layout": layout === "horizontal" })}
-      >
-        {scoreXml && layout === "page" ? (
-          <PageScoreRenderer
-            scoreData={scoreXml}
-            zoomLevel={zoomLevel}
-            onOsmdChange={(osmd) => {
-              pageOsmdRef.current = osmd;
-              activeMeasureKeyRef.current = null;
-            }}
-            onReady={() => setScoreError(null)}
-            onRenderError={() => setScoreError("Couldn't show the score.")}
-          />
-        ) : scoreXml ? (
-          <HorizontalScoreRenderer
-            scoreData={scoreXml}
-            zoomLevel={zoomLevel}
-            measuresPerBatch={measuresPerBatch}
-            scrollContainerRef={canvasRef}
-            onRendererChange={(renderer) => {
-              rendererRef.current = renderer;
-              activeMeasureKeyRef.current = null;
-            }}
-            onReady={() => setScoreError(null)}
-            onRenderError={() => setScoreError("Couldn't show the score.")}
-          />
-        ) : null}
-        {scoreError ? <p className="share-page-message" role="alert">{scoreError}</p> : null}
       </div>
 
       <ScorePlayerEngine
