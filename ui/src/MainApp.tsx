@@ -92,6 +92,7 @@ import {
 import { ScorePlayerEngine, withoutKeysOutside, type ScorePlayerPlaybackControls } from "./player/ScorePlayerEngine";
 import CreditsHeader from "./components/CreditsHeader";
 import SingAllCard, { SingAllDownloadButton } from "./components/SingAllCard";
+import { noticeInBackground } from "./tabNotice";
 import { UserMenu } from "./components/UserMenu";
 import SongsDrawer from "./components/SongsDrawer";
 import NewSongOrReplaceModal from "./components/NewSongOrReplaceModal";
@@ -4196,6 +4197,17 @@ export default function MainApp() {
     if (job.status === "running") singAllSeenRunningRef.current.add(job.jobId);
     setSingAllJobs((current) => ({ ...current, [job.jobId]: job }));
   }, []);
+
+  // A Sing All this tab saw running chimes once when it ends, if the tab is in the background.
+  const singAllNoticedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    Object.values(singAllJobs).forEach((job) => {
+      if (job.status === "running" || job.status === "needs_decision") return;
+      if (!singAllSeenRunningRef.current.has(job.jobId) || singAllNoticedRef.current.has(job.jobId)) return;
+      singAllNoticedRef.current.add(job.jobId);
+      noticeInBackground();
+    });
+  }, [singAllJobs]);
 
   const loadSingAllJob = useCallback(
     (jobId: string) => {

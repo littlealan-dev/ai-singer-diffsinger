@@ -677,6 +677,58 @@ test("packaging shows Mixing, then Packing the zip; the ended card downloads the
   expect(backend.downloads).toBe(2);
 });
 
+test("a job that ends while the tab is in the background chimes once and marks the title", async ({ page }) => {
+  // A stand-in for Web Audio counts the chime's notes; the page is marked hidden by hand.
+  await page.addInitScript(() => {
+    const started: number[] = [];
+    (window as unknown as { chimeNotes: number[] }).chimeNotes = started;
+    class FakeNode { connect(node: unknown) { return node; } }
+    class FakeContext {
+      currentTime = 0;
+      destination = new FakeNode();
+      resume() { return Promise.resolve(); }
+      createGain() {
+        const param = { setValueAtTime() {}, exponentialRampToValueAtTime() {} };
+        return Object.assign(new FakeNode(), { gain: param });
+      }
+      createOscillator() {
+        return Object.assign(new FakeNode(), {
+          type: "sine", frequency: { value: 0 },
+          start() { started.push(1); }, stop() {},
+        });
+      }
+    }
+    (window as unknown as { AudioContext: unknown }).AudioContext = FakeContext;
+  });
+  const backend = await openSong(page, "sing-all-tab-notice");
+  await goToSong(page);
+  await openCard(page);
+  await page.getByTestId("sing-all-sing-it").click();
+  await expect(card(page)).toContainText("Packing the zip");
+  const title = await page.title();
+
+  const setHidden = (hidden: boolean) => page.evaluate((value) => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => value });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, hidden);
+  await setHidden(true);
+  backend.setJob(progress({
+    status: "completed", stage: "done", endedAt: "2026-01-01T10:05:00Z", remainingS: null,
+    counts: { splits: { done: 0, total: 0 }, takes: { done: 2, failed: 0, total: 2 } },
+    package: { state: "done", mixes: { done: 3, total: 3 } },
+    credits: { reserved: 0, charged: 5, refunded: 0 }, receipt: [],
+  }), { active: false });
+  await expect(card(page)).toContainText("Done: every part is sung");
+  await expect.poll(() => page.title()).toBe(`● ${title}`);
+  expect(await page.evaluate(() => (window as unknown as { chimeNotes: number[] }).chimeNotes.length)).toBe(2);
+
+  await setHidden(false);
+  await expect.poll(() => page.title()).toBe(title);
+  // The same job doesn't chime again.
+  await page.waitForTimeout(500);
+  expect(await page.evaluate(() => (window as unknown as { chimeNotes: number[] }).chimeNotes.length)).toBe(2);
+});
+
 test("a failed package says so with no zip; a zip that's gone says it isn't available", async ({ page }) => {
   const backend = await openSong(page, "sing-all-package-failed");
   const ended = (pack: Json, receipt: Json[] = []) => progress({
