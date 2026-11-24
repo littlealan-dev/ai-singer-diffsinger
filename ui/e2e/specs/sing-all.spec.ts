@@ -305,7 +305,10 @@ test("the button opens the card; Customise asks again and Apply sends the style 
   expect(backend.quotes[0]).toEqual({ language: "en", solfegeOnly: false });
   release();
   await expect(card(page)).toContainText("2 vocal parts · English · verse 1 of 2 · with repeats · 0:30");
-  await expect(card(page)).toContainText("Voices: Soprano · Voice A, Alto · Voice B");
+  const partsTable = card(page).getByRole("table", { name: "Parts & voices" });
+  await expect(partsTable.getByRole("row", { name: "Soprano Voice A" })).toBeVisible();
+  await expect(partsTable.getByRole("row", { name: "Alto Voice B" })).toBeVisible();
+  await expect(partsTable.getByRole("checkbox").or(partsTable.getByRole("combobox"))).toHaveCount(0);
   await expect(page.getByTestId("sing-all-sing-it")).toHaveText("Sing it · 3 cr");
 
   await card(page).getByRole("button", { name: /Customise/ }).click();
@@ -330,6 +333,8 @@ test("the button opens the card; Customise asks again and Apply sends the style 
   await card(page).getByRole("button", { name: "Apply" }).click();
   await expect.poll(() => backend.quotes.length).toBe(4);
   expect(backend.quotes[3].styleNote).toBe("Warm and soft");
+  await expect(partsTable.getByRole("row", { name: "Soprano Voice B" })).toBeVisible();
+  await expect(partsTable.getByRole("cell", { name: "Alto" })).toHaveCount(0);
   await expect(card(page)).toContainText("Style: “Warm and soft”");
   await expect(card(page)).toContainText("Soprano · Voice B · airiness +10");
   await expect(page.getByTestId("sing-all-sing-it")).toHaveText("Sing it · 2 cr");

@@ -744,9 +744,28 @@ function SingAllQuoteView({
         <>
           {quoteChangedLine && <p className="sing-all-notice">The score changed, so here is the new quote.</p>}
           <p className="sing-all-summary-line">{summaryBits.join(" · ")}</p>
-          <p className="sing-all-muted">
-            Voices: {included.map((row) => `${row.name} · ${voiceName(row.voice)}`).join(", ") || "none"}
-          </p>
+          <table className="sing-all-table sing-all-parts-table">
+            <caption className="sing-all-row-label">Parts &amp; voices</caption>
+            <thead>
+              <tr>
+                <th scope="col">Vocal part</th>
+                <th scope="col">AI voice</th>
+              </tr>
+            </thead>
+            <tbody>
+              {included.map((row) => (
+                <tr key={row.rowId}>
+                  <td>{row.name}</td>
+                  <td>{voiceName(row.voice)}</td>
+                </tr>
+              ))}
+              {included.length === 0 && (
+                <tr>
+                  <td colSpan={2} className="sing-all-muted">No vocal parts selected</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
           {q.style.note && (
             <div className="sing-all-style-lines">
               <p className="sing-all-muted">Style: “{q.style.note}”</p>

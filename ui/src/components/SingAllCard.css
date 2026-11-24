@@ -234,6 +234,20 @@
   font-weight: 500;
 }
 
+.sing-all-parts-table {
+  table-layout: fixed;
+  overflow-wrap: anywhere;
+}
+
+.sing-all-parts-table caption {
+  padding-bottom: 4px;
+  text-align: left;
+}
+
+.sing-all-parts-table th:first-child {
+  width: 38%;
+}
+
 .sing-all-inline-note {
   font-size: 12px;
 }
