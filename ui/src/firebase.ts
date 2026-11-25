@@ -88,9 +88,16 @@ if (app && appCheckSiteKey && !isDev) {
 
 export { auth, app, db };
 
+function analyticsConsented(): boolean {
+  try {
+    return window.localStorage.getItem("analytics_consent") === "granted";
+  } catch {
+    return false;
+  }
+}
+
 export function initAnalytics(): Analytics | null {
-  if (!app || !firebaseConfig.measurementId) return null;
-  if (typeof window === "undefined") return null;
+  if (!analyticsConsented() || !app || !firebaseConfig.measurementId) return null;
   if (!analytics) {
     analytics = getAnalytics(app);
     if (import.meta.env.VITE_APP_ENV) {
@@ -101,6 +108,7 @@ export function initAnalytics(): Analytics | null {
 }
 
 export function logPageView(instance?: Analytics | null) {
+  if (!analyticsConsented()) return;
   const active = instance ?? analytics ?? initAnalytics();
   if (!active || typeof window === "undefined") return;
   if (!hasUtmParams(window.location.search)) return;
@@ -121,6 +129,7 @@ export function logPageView(instance?: Analytics | null) {
 }
 
 export function logAnalyticsEvent(eventName: string, params: Record<string, unknown> = {}) {
+  if (!analyticsConsented()) return;
   const active = analytics ?? initAnalytics();
   if (!active || typeof window === "undefined") return;
   const env = import.meta.env.VITE_APP_ENV as string | undefined;
