@@ -13,7 +13,7 @@ interface SongsDrawerProps {
   canOpen: boolean;
   onOpen: (songId: string) => void;
   onDeleted: (songId: string) => void;
-  /** Whether this user can share; a row offers Share only then. */
+  /** Whether this user can share. */
   shareAvailable: boolean;
   onShareChange: (songId: string, share: ShareState) => void;
 }
@@ -186,11 +186,14 @@ export default function SongsDrawer({
                           Open
                         </button>
                       )}
-                      {shareAvailable && (song.track_count > 0 || song.shared) ? (
-                        <button type="button" className="btn-secondary-inline" onClick={() => setSharing(song)}>
-                          Share
-                        </button>
-                      ) : null}
+                      <button
+                        type="button"
+                        className="btn-secondary-inline"
+                        disabled={!(shareAvailable && (song.track_count > 0 || song.shared))}
+                        onClick={() => setSharing(song)}
+                      >
+                        Share
+                      </button>
                       <button
                         type="button"
                         className="btn-secondary-inline"

@@ -15,6 +15,7 @@ export function useAnnouncements(): UseAnnouncementsResult {
     const { user } = useAuth();
     const [lastSeenId, setLastSeenId] = useState<string | null>(null);
     const [pendingAnnouncementId, setPendingAnnouncementId] = useState<string | null>(null);
+    const [dismissedAnnouncement, setDismissedAnnouncement] = useState<{ userId: string; id: string } | null>(null);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
@@ -44,6 +45,7 @@ export function useAnnouncements(): UseAnnouncementsResult {
 
     const markAsSeen = async (announcementId: string) => {
         if (!user) return;
+        setDismissedAnnouncement({ userId: user.uid, id: announcementId });
         const userDocRef = doc(db, 'users', user.uid);
         try {
             await setDoc(
@@ -92,6 +94,7 @@ export function useAnnouncements(): UseAnnouncementsResult {
         !loading && 
         !!user && 
         lastSeenId !== LATEST_ANNOUNCEMENT_ID && 
+        !(dismissedAnnouncement?.userId === user.uid && dismissedAnnouncement.id === LATEST_ANNOUNCEMENT_ID) &&
         !!currentAnnouncement && 
         (!currentAnnouncement.requiresPending || pendingAnnouncementId === LATEST_ANNOUNCEMENT_ID) &&
         isWithinEffectiveRange(currentAnnouncement);

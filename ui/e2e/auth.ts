@@ -7,7 +7,10 @@ export async function signInAsE2EUser(
 ): Promise<void> {
   if (!featureTour) {
     // The one-time feature tour covers controls that other tests click.
-    await page.addInitScript(() => localStorage.setItem("sightsinger.feature-tour-done", "true"));
+    await page.addInitScript(() => {
+      localStorage.setItem("sightsinger.feature-tour-done", "true");
+      localStorage.setItem("sightsinger.sing-all-tour-done", "true");
+    });
   }
   const uid = `e2e-${testId.replace(/[^a-z0-9-]/gi, "-")}`;
   const email = `${uid}@example.test`;

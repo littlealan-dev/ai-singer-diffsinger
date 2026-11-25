@@ -349,6 +349,7 @@ function SingAllQuoteView({
             <button
               type="button"
               className="sing-all-link sing-all-summary-toggle"
+              data-tour="sing-all-customise"
               aria-expanded={customising}
               onClick={() => {
                 if (!customising) setStyleDraft(appliedNote);
@@ -424,19 +425,18 @@ function SingAllQuoteView({
     q.options.languages.find((language) => language.code === q.options.language)?.label
   );
   const verseCount = q.options.verses.length;
+  const showStyle = Boolean(q.style.note);
   const summaryBits = [
     `${included.length} vocal part${included.length === 1 ? "" : "s"}`,
     q.options.mode === "lyrics" ? null : q.options.mode === "solfege" ? "solfège (do-re-mi)" : "lyrics + solfège",
     languageLabel,
+    q.style.note,
     q.options.mode !== "solfege" && verseCount > 1 ? `verse ${q.options.verse} of ${verseCount}` : null,
     q.options.repeats ? "with repeats" : "no repeats",
     seconds ? formatDuration(seconds) : null,
   ].filter(Boolean);
   const notEnough = q.blocked === "not_enough_credits";
   const rowNotes = included.map((row) => (row.note === "no_words" ? rowNote(row) : null)).filter(Boolean);
-  const styleRows = included
-    .map((row) => ({ row, line: q.style.changes[row.rowId] ? styleLine(q.style.changes[row.rowId]) : "" }))
-    .filter(({ line }) => line);
 
   const quoteTable = (
     <table className="sing-all-table sing-all-quote-table sing-all-task-table">
@@ -518,7 +518,7 @@ function SingAllQuoteView({
 
   const actionButton =
     q.blocked === "free_plan" ? (
-      <button type="button" className="selection-send" onClick={onUpgrade}>
+      <button type="button" className="selection-send" data-tour="sing-all-action" onClick={onUpgrade}>
         Upgrade to sing
       </button>
     ) : notEnough ? (
@@ -539,6 +539,7 @@ function SingAllQuoteView({
         type="button"
         className="selection-send"
         data-testid="sing-all-sing-it"
+        data-tour="sing-all-action"
         disabled={pending || starting || q.blocked === "nothing_to_sing"}
         onClick={() => void singIt()}
       >
@@ -744,12 +745,13 @@ function SingAllQuoteView({
         <>
           {quoteChangedLine && <p className="sing-all-notice">The score changed, so here is the new quote.</p>}
           <p className="sing-all-summary-line">{summaryBits.join(" · ")}</p>
-          <table className="sing-all-table sing-all-parts-table">
+          <table className={clsx("sing-all-table sing-all-parts-table", showStyle && "sing-all-parts-table-with-style")}>
             <caption className="sing-all-row-label">Parts &amp; voices</caption>
             <thead>
               <tr>
                 <th scope="col">Vocal part</th>
                 <th scope="col">AI voice</th>
+                {showStyle && <th scope="col">Style</th>}
               </tr>
             </thead>
             <tbody>
@@ -757,25 +759,16 @@ function SingAllQuoteView({
                 <tr key={row.rowId}>
                   <td>{row.name}</td>
                   <td>{voiceName(row.voice)}</td>
+                  {showStyle && <td>{styleLine(q.style.changes[row.rowId] ?? {}) || "—"}</td>}
                 </tr>
               ))}
               {included.length === 0 && (
                 <tr>
-                  <td colSpan={2} className="sing-all-muted">No vocal parts selected</td>
+                  <td colSpan={showStyle ? 3 : 2} className="sing-all-muted">No vocal parts selected</td>
                 </tr>
               )}
             </tbody>
           </table>
-          {q.style.note && (
-            <div className="sing-all-style-lines">
-              <p className="sing-all-muted">Style: “{q.style.note}”</p>
-              {styleRows.map(({ row, line }) => (
-                <p key={row.rowId} className="sing-all-muted">
-                  {row.name} · {voiceName(row.voice)} · {line}
-                </p>
-              ))}
-            </div>
-          )}
           {q.blocked === "style_unavailable" && <p className="sing-all-warning">The style couldn't be applied.</p>}
           {[...rowNotes, ...q.notes.map(noteText)].map((text) => (
             <p key={text} className="sing-all-muted">
@@ -1165,6 +1158,7 @@ export function SingAllDownloadButton({ jobId, compact = false }: { jobId: strin
       type="button"
       className="selection-send"
       data-testid="sing-all-download"
+      data-tour={compact ? "sing-all-zip" : undefined}
       disabled={downloading}
       // The score bar has no room for a message line; the reason shows on hover there.
       title={compact ? error ?? undefined : undefined}

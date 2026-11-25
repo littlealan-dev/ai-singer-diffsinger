@@ -49,6 +49,28 @@
   font-size: 13px;
 }
 
+.feature-tour-close {
+  position: absolute;
+  inset: 6px 6px auto auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.feature-tour-close:hover {
+  background: rgba(255, 243, 196, 0.18);
+}
+
+.feature-tour-close + .feature-tour-title {
+  padding-right: 24px;
+}
+
 .feature-tour-body {
   margin: 0;
 }

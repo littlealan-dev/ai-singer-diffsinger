@@ -1775,6 +1775,26 @@ div[id^="fire_app_check_"] {
   transform: none;
 }
 
+.starting-conversation-button.sing-all-trigger {
+  border-color: #a78337;
+  border-radius: 999px;
+  background: linear-gradient(120deg, #12100d 0%, #30220e 55%, #654914 100%);
+  color: #fff3c4;
+}
+
+.starting-conversation-button.sing-all-trigger svg {
+  color: #f0c76a;
+}
+
+.starting-conversation-button.sing-all-trigger:hover:not(:disabled) {
+  border-color: #e6bb5b;
+  background: linear-gradient(120deg, #19140c 0%, #3e2c10 55%, #79571a 100%);
+}
+
+.starting-conversation-button.sing-all-trigger:focus-visible {
+  outline-color: #e6bb5b;
+}
+
 .demo-chat-input {
   gap: 10px;
 }

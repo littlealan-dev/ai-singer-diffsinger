@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { randomUUID } from "node:crypto";
 
 import { signInAsE2EUser } from "../auth";
 
@@ -21,6 +22,7 @@ async function mockBackend(page: Page): Promise<void> {
     if (path === "/maintenance/status") return json({ enabled: false, allowed: true });
     if (path === "/api/voicebanks") return json({ voicebanks: [{ id: "liee", name: LONG_VOICE }] });
     if (path === "/sessions") return json({ session_id: "feature-tour-session" });
+    if (path.endsWith("/chat")) return json({ type: "chat_text", message: "Please upload a score first." });
     if (path.endsWith("/solfege-settings")) return json({ system: "movable_do", mode: "major", revision: 1 });
     return json({});
   });
@@ -28,6 +30,7 @@ async function mockBackend(page: Page): Promise<void> {
 
 async function openStudio(page: Page, testId: string): Promise<void> {
   await mockBackend(page);
+  await page.addInitScript(() => localStorage.setItem("sightsinger.sing-all-tour-done", "true"));
   // The tour waits until no release announcement is showing. The emulator's
   // rules cannot record a test account dismissing one, and the account's
   // Firestore uid is generated at sign-in, so it cannot be marked seen up
@@ -92,6 +95,43 @@ test("Skip ends the tour for good", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Studio Chat" })).toBeVisible();
   await page.waitForTimeout(1_000);
   await expect(tour(page)).toHaveCount(0);
+});
+
+test("the new tips wait for the announcement and for visible controls", async ({ page }) => {
+  await mockBackend(page);
+  await page.addInitScript(() => localStorage.setItem("sightsinger.feature-tour-done", "true"));
+  await page.clock.setFixedTime(new Date("2026-11-25T12:00:00Z"));
+  await signInAsE2EUser(page, `sing-all-release-tour-${randomUUID()}`, { featureTour: true });
+
+  const announcement = page.locator(".announcement-overlay");
+  await expect(announcement).toBeVisible();
+  await expect(tour(page)).toHaveCount(0);
+  await announcement.getByRole("button", { name: "Close", exact: true }).click();
+  const declineCookies = page.getByRole("button", { name: "Decline" });
+  if (await declineCookies.isVisible()) await declineCookies.click();
+  await expect(tour(page).locator(".feature-tour-title")).toHaveText("My songs");
+  const share = page.getByTestId("share-song");
+  await expect(share).toBeVisible();
+  await expect(share).toBeDisabled();
+
+  const offscreen = await page.addStyleTag({ content: '[data-tour="share-song"] { position: fixed; top: 110vh; }' });
+  await tour(page).getByRole("button", { name: "Next" }).click();
+  const singAll = page.getByTestId("sing-all-button");
+  await expect(tour(page).locator(".feature-tour-title")).toHaveText("Sing All");
+  await expect(singAll).toHaveClass(/feature-tour-target/);
+  await expect(singAll).toHaveCSS("background-image", /linear-gradient/);
+  const request = page.waitForRequest((req) => req.url().endsWith("/chat") && req.method() === "POST");
+  await singAll.click();
+  expect((await request).postDataJSON().message).toBe("Sing All");
+  await expect(page.getByTestId("chat-stream")).toContainText("Please upload a score first.");
+  await expect(tour(page)).toHaveCount(0);
+
+  await offscreen.evaluate((style) => style.remove());
+  await expect(tour(page).locator(".feature-tour-title")).toHaveText("Share");
+  await expect(share).toHaveClass(/feature-tour-target/);
+  await tour(page).getByRole("button", { name: "Close tour" }).click();
+  await expect(tour(page)).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem("sightsinger.sing-all-tour-done"))).toBe("true");
 });
 
 test("the voice button shows a microphone and the voice name, cut short when too long", async ({ page }) => {

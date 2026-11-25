@@ -5693,6 +5693,7 @@ export default function MainApp() {
             type="button"
             className="btn-secondary-inline song-nav-button"
             data-testid="my-songs"
+            data-tour="my-songs"
             title="My songs"
             onClick={() => setSongsDrawerOpen(true)}
           >
@@ -6057,19 +6058,18 @@ export default function MainApp() {
           </div>
           <div className="chat-input">
             <div className="starting-conversations" aria-label="Suggested starting conversations">
-              {scoreSummary && (
-                <button
-                  type="button"
-                  className="starting-conversation-button sing-all-trigger"
-                  data-testid="sing-all-button"
-                  disabled={creditsLocked || browserMixBounceActive || chatTurnInProgress || singAllRunningHere}
-                  title={singAllRunningHere ? "A Sing All is running" : undefined}
-                  onClick={() => void sendMessage(SING_ALL_PROMPT)}
-                >
-                  <Sparkles size={15} aria-hidden="true" />
-                  <span>Sing All</span>
-                </button>
-              )}
+              <button
+                type="button"
+                className="starting-conversation-button sing-all-trigger"
+                data-testid="sing-all-button"
+                data-tour="sing-all"
+                disabled={creditsLocked || browserMixBounceActive || chatTurnInProgress || singAllRunningHere}
+                title={singAllRunningHere ? "A Sing All is running" : undefined}
+                onClick={() => void sendMessage(SING_ALL_PROMPT)}
+              >
+                <Sparkles size={15} aria-hidden="true" />
+                <span>Sing All</span>
+              </button>
               {starterPrompts.map((suggestion) => (
                 <button
                   key={suggestion}
@@ -6631,24 +6631,25 @@ export default function MainApp() {
                     <HorizontalViewIcon />
                   </button>
                 </div>
-                {currentSong?.share?.available && (hasSungTrack || currentSong.share.enabled) ? (
-                  <button
-                    type="button"
-                    className="score-action-button"
-                    data-testid="share-song"
-                    onClick={() =>
-                      setShareBoxSong({
-                        id: currentSong.id,
-                        title: currentSong.title,
-                        url: currentSong.share?.enabled ? currentSong.share.url : null,
-                      })
-                    }
-                    aria-label="Share song"
-                    title="Share song"
-                  >
-                    <Share2 size={16} />
-                  </button>
-                ) : null}
+                <button
+                  type="button"
+                  className="score-action-button"
+                  data-testid="share-song"
+                  data-tour="share-song"
+                  disabled={!(currentSong?.share?.available && (hasSungTrack || currentSong.share.enabled))}
+                  onClick={() => {
+                    if (!currentSong) return;
+                    setShareBoxSong({
+                      id: currentSong.id,
+                      title: currentSong.title,
+                      url: currentSong.share?.enabled ? currentSong.share.url : null,
+                    });
+                  }}
+                  aria-label="Share song"
+                  title="Share song"
+                >
+                  <Share2 size={16} />
+                </button>
                 <button
                   type="button"
                   className="score-action-button"
@@ -6910,14 +6911,12 @@ export default function MainApp() {
         />
       ) : null}
       {showAnnouncement && currentAnnouncement ? (
-        <AnnouncementModal 
-          announcement={currentAnnouncement} 
-          onClose={() => markAsSeen(currentAnnouncement.id)} 
+        <AnnouncementModal
+          announcement={currentAnnouncement}
+          onClose={() => markAsSeen(currentAnnouncement.id)}
         />
-      ) : (
-        // Waits for the announcement check, so it never opens underneath one.
-        !announcementsLoading && <FeatureTour />
-      )}
+      ) : null}
+      <FeatureTour paused={announcementsLoading || showAnnouncement} />
     </div>
   );
 }

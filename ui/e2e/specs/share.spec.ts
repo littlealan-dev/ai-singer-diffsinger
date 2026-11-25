@@ -660,15 +660,17 @@ test("a link that was turned off, and too many requests, each say so", async ({ 
   await viewer.context().close();
 });
 
-test("Share is not offered when sharing isn't available to this user", async ({ page }) => {
+test("Share stays visible and disabled when sharing isn't available to this user", async ({ page }) => {
   const backend = await createBackend();
   backend.state.available = false;
   backend.state.vocals.push({ key: "P1:lyrics", label: "Soprano", mode: "lyrics" });
   await openSongAsOwner(page, backend, "share-not-available");
   await expect(page.getByTestId("score-tracks-panel")).toBeVisible();
-  await expect(page.getByTestId("share-song")).toHaveCount(0);
+  await expect(page.getByTestId("share-song")).toBeVisible();
+  await expect(page.getByTestId("share-song")).toBeDisabled();
   await page.getByTestId("my-songs").click();
   const drawer = page.getByRole("dialog", { name: "My songs" });
   await expect(drawer.getByTestId("song-row")).toHaveCount(1);
-  await expect(drawer.getByRole("button", { name: "Share" })).toHaveCount(0);
+  await expect(drawer.getByRole("button", { name: "Share" })).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "Share" })).toBeDisabled();
 });

@@ -124,7 +124,8 @@ test("Sing All runs from the chat button to its receipt, with every response in 
   expect(Object.keys(styled.style.controls).sort()).toEqual(
     styled.rows.map((row: { rowId: string }) => row.rowId).sort(),
   );
-  await expect(card(page)).toContainText("Style: “Warm and soft”");
+  await expect(card(page)).toContainText("English · Warm and soft");
+  await expect(card(page).getByRole("table", { name: "Parts & voices" }).getByRole("columnheader", { name: "Style" })).toBeVisible();
 
   // Sing it answers the job's Progress.
   const started = page.waitForResponse(

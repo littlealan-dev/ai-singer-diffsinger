@@ -293,6 +293,50 @@ async function openCard(page: Page) {
   await expect(card(page)).toBeVisible();
 }
 
+test("the contextual Sing All tips appear on the card and the finished score toolbar", async ({ page }) => {
+  const backend = await mockBackend(page);
+  await page.clock.setFixedTime(new Date("2026-08-01T12:00:00Z"));
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.addInitScript(() => localStorage.setItem("sightsinger.feature-tour-done", "true"));
+  await signInAsE2EUser(page, "sing-all-contextual-tour", { featureTour: true });
+  const declineCookies = page.getByRole("button", { name: "Decline" });
+  if (await declineCookies.isVisible()) await declineCookies.click();
+  await goToSong(page);
+  const tour = page.getByRole("dialog", { name: "Sing All and sharing tour" });
+  for (const title of ["My songs", "Share", "Sing All"]) {
+    await expect(tour.locator(".feature-tour-title")).toHaveText(title);
+    await tour.getByRole("button", { name: "Next" }).click();
+  }
+  await expect(tour).toHaveCount(0);
+
+  await openCard(page);
+  const customise = card(page).getByRole("button", { name: /Customise/ });
+  await customise.scrollIntoViewIfNeeded();
+  await expect(tour.locator(".feature-tour-title")).toHaveText("Customise");
+  await tour.getByRole("button", { name: "Next" }).click();
+  const singIt = page.getByTestId("sing-all-sing-it");
+  await singIt.scrollIntoViewIfNeeded();
+  await expect(tour.locator(".feature-tour-title")).toHaveText("Start singing");
+  await singIt.click();
+  await expect(tour).toHaveCount(0);
+
+  backend.setJob(progress({
+    status: "completed",
+    stage: "done",
+    endedAt: "2026-01-01T10:05:00Z",
+    remainingS: null,
+    counts: { splits: { done: 0, total: 0 }, takes: { done: 2, failed: 0, total: 2 } },
+    package: { state: "done", mixes: { done: 1, total: 1 } },
+  }), { active: false });
+  const zip = page.locator(".score-zoom-group").getByRole("button", { name: "Download zip" });
+  await expect(zip).toBeVisible();
+  await zip.scrollIntoViewIfNeeded();
+  await expect(tour.locator(".feature-tour-title")).toHaveText("Download zip");
+  await expect(zip).toHaveClass(/feature-tour-target/);
+  await tour.getByRole("button", { name: "Done" }).click();
+  await expect(tour).toHaveCount(0);
+});
+
 test("the button opens the card; Customise asks again and Apply sends the style note", async ({ page }) => {
   const backend = await openSong(page, "sing-all-quote");
   await goToSong(page);
@@ -308,6 +352,7 @@ test("the button opens the card; Customise asks again and Apply sends the style 
   const partsTable = card(page).getByRole("table", { name: "Parts & voices" });
   await expect(partsTable.getByRole("row", { name: "Soprano Voice A" })).toBeVisible();
   await expect(partsTable.getByRole("row", { name: "Alto Voice B" })).toBeVisible();
+  await expect(partsTable.getByRole("columnheader", { name: "Style" })).toHaveCount(0);
   await expect(partsTable.getByRole("checkbox").or(partsTable.getByRole("combobox"))).toHaveCount(0);
   await expect(page.getByTestId("sing-all-sing-it")).toHaveText("Sing it · 3 cr");
 
@@ -333,10 +378,12 @@ test("the button opens the card; Customise asks again and Apply sends the style 
   await card(page).getByRole("button", { name: "Apply" }).click();
   await expect.poll(() => backend.quotes.length).toBe(4);
   expect(backend.quotes[3].styleNote).toBe("Warm and soft");
-  await expect(partsTable.getByRole("row", { name: "Soprano Voice B" })).toBeVisible();
+  await expect(partsTable.getByRole("columnheader")).toHaveText(["Vocal part", "AI voice", "Style"]);
+  await expect(partsTable.getByRole("row", { name: /Soprano/ }).getByRole("cell")).toHaveText([
+    "Soprano", "Voice B", "airiness +10",
+  ]);
   await expect(partsTable.getByRole("cell", { name: "Alto" })).toHaveCount(0);
-  await expect(card(page)).toContainText("Style: “Warm and soft”");
-  await expect(card(page)).toContainText("Soprano · Voice B · airiness +10");
+  await expect(card(page)).toContainText("1 vocal part · English · Warm and soft · verse 1 of 2 · with repeats · 0:30");
   await expect(page.getByTestId("sing-all-sing-it")).toHaveText("Sing it · 2 cr");
 });
 
@@ -834,7 +881,10 @@ test("signed out, the job link signs in first and then opens the Song", async ({
   const backend = await mockBackend(page);
   historyWithJobThenChat(backend);
   backend.setJob(endedJob(), { active: false });
-  await page.addInitScript(() => localStorage.setItem("sightsinger.feature-tour-done", "true"));
+  await page.addInitScript(() => {
+    localStorage.setItem("sightsinger.feature-tour-done", "true");
+    localStorage.setItem("sightsinger.sing-all-tour-done", "true");
+  });
   await page.goto("/jobs/job-1");
   await expect(page.getByText("Sign in to open this song.")).toBeVisible();
   await page.evaluate(async () => {

@@ -232,6 +232,7 @@
 .sing-all-summary-line {
   margin: 0;
   font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .sing-all-parts-table {
@@ -246,6 +247,14 @@
 
 .sing-all-parts-table th:first-child {
   width: 38%;
+}
+
+.sing-all-parts-table-with-style th:first-child {
+  width: 27%;
+}
+
+.sing-all-parts-table-with-style th:last-child {
+  width: 25%;
 }
 
 .sing-all-inline-note {
@@ -464,10 +473,6 @@
 /* Not enough credits: the total in red. */
 .sing-all-total.sing-all-short td {
   color: #ff7a7a;
-}
-
-.sing-all-style-lines p {
-  margin: 0;
 }
 
 /* The running job: the stages in order, the current one strong. */
