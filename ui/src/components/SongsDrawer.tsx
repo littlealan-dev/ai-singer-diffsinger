@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { ApiError, deleteSong, listSongs, type SongRow } from "../api";
-import ShareSongModal, { type ShareState } from "../share/ShareSongModal";
+import ShareSongModal, { shareBlockedReason, type ShareState } from "../share/ShareSongModal";
 import "./SongsDrawer.css";
 
 interface SongsDrawerProps {
@@ -150,6 +150,10 @@ export default function SongsDrawer({
             {songs.map((song) => {
               const working = song.status === "working";
               const isCurrent = song.id === currentSongId;
+              const shareBlocked = shareBlockedReason({
+                share: { available: shareAvailable, enabled: Boolean(song.shared) },
+                hasSungTrack: song.track_count > 0,
+              });
               return (
                 <li key={song.id} className="songs-drawer-row" data-testid="song-row" aria-current={isCurrent || undefined}>
                   <div className="songs-drawer-row-copy">
@@ -189,7 +193,8 @@ export default function SongsDrawer({
                       <button
                         type="button"
                         className="btn-secondary-inline"
-                        disabled={!(shareAvailable && (song.track_count > 0 || song.shared))}
+                        disabled={shareBlocked !== null}
+                        title={shareBlocked ?? undefined}
                         onClick={() => setSharing(song)}
                       >
                         Share

@@ -144,6 +144,46 @@ def test_upload_fills_song_info_and_replace_keeps_the_owners_edits(workspace):
     asyncio.run(scenario())
 
 
+def test_reading_song_info_alone_keeps_the_songs_place_in_my_songs(workspace):
+    """The Share dialog reads the info of any Song in My songs: that read is no activity."""
+    store, _, _ = workspace
+    # An owner of its own: a long-running emulator keeps other tests' Songs.
+    owner = f"song-owner-{uuid.uuid4().hex}"
+
+    async def scenario():
+        sid = (await store.create_session(owner)).id
+        await _upload(store, sid, score_info={"composer": "Ann Example"})
+        before = {row["id"]: row["last_active_at"] for row in await store.list_songs(owner, 10)}
+        data, _ = await store.read_song_info(sid, owner)
+        assert (data["title"], data["songInfo"]["composer"]) == ("Made-up Tune", "Ann Example")
+        after = {row["id"]: row["last_active_at"] for row in await store.list_songs(owner, 10)}
+        assert after == before
+        with pytest.raises((KeyError, PermissionError)):
+            await store.read_song_info(sid, "someone-else")
+
+    asyncio.run(scenario())
+
+
+def test_the_info_route_answers_the_workspaces_info(client):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    _upload_score(test_client, session_id)
+    take = _start_take(app, session_id, "sung-take", voicebankName="Made-up Voice")
+    asyncio.run(app.state.sessions.record_take(session_id, "sung-take", take))
+    test_client.patch(f"/songs/{session_id}", json={"info": {"composer": "Ann Example"}})
+    opened = test_client.get(f"/songs/{session_id}/workspace").json()["song"]["info"]
+    before = test_client.get("/songs").json()["songs"]
+
+    info = test_client.get(f"/songs/{session_id}/info")
+    assert info.status_code == 200
+    assert info.json() == opened
+    assert info.json()["voices"] == ["Made-up Voice"]
+    assert test_client.get("/songs").json()["songs"] == before
+    missing = test_client.get("/songs/no-such-song/info")
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "song_not_found"
+
+
 def test_patch_edits_song_info_and_refuses_a_bad_field(client):
     test_client, _ = client
     session_id = _create_session(test_client)

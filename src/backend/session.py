@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 import asyncio
 import json
 import shutil
@@ -652,6 +652,14 @@ class SessionStore(WorkspacePersistence):
         async with self._lock:
             state = self._song_locked(session_id, user_id)
             return _song_row(session_id, self._state_song_fields(state), state.player)
+
+    async def read_song_info(self, session_id: str, user_id: str) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        """The Song's info fields and its player, with no activity write."""
+        async with self._lock:
+            state = self._song_locked(session_id, user_id)
+            fields = {"title": state.title, "songInfo": state.song_info,
+                      "scoreId": state.score_id, "scoreSummary": state.score_summary}
+            return copy.deepcopy(fields), copy.deepcopy(state.player)
 
     async def list_songs(self, user_id: str, limit: int) -> List[Dict[str, Any]]:
         """The user's listed Songs, newest activity first."""
@@ -1345,6 +1353,17 @@ class FirestoreSessionStore(WorkspacePersistence):
             data = self._owned_song(self._doc_ref(session_id).get(), session_id, user_id)
             player = self._player_ref(session_id).get()
             return _song_row(session_id, data, (player.to_dict() or {}) if player.exists else None)
+
+        return await self._run_session_io(session_id, run)
+
+    async def read_song_info(self, session_id: str, user_id: str) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        """The Song's info fields and its player, read without the chat or the score, with no activity write."""
+        fields = ["userId", "deletedAt", "songCreatedAt", "title", "songInfo", "scoreId", "scoreSummary"]
+
+        def run() -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+            data = self._owned_song(self._doc_ref(session_id).get(field_paths=fields), session_id, user_id)
+            player = self._player_ref(session_id).get()
+            return data, (player.to_dict() or {}) if player.exists else None
 
         return await self._run_session_io(session_id, run)
 

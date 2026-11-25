@@ -171,6 +171,7 @@ async function createBackend(): Promise<Backend> {
         token ??= `tok${String(++tokens).padStart(19, "0")}`;
         return json({ enabled: true, url: shareUrl(page) });
       }
+      if (at === `/songs/${SONG}/info`) return json(songInfo());
       if (at === `/songs/${SONG}/workspace`) {
         return json({
           session_id: SONG,
@@ -267,6 +268,35 @@ async function shareFromTheApp(page: Page): Promise<string> {
   await expect(link).toHaveValue(/\/s\/tok/);
   return link.inputValue();
 }
+
+test("a Share button that is off says why", async ({ page }) => {
+  await page.goto("/");
+  const reasons = await page.evaluate(async () => {
+    const { shareBlockedReason } = await import("/src/share/ShareSongModal.tsx");
+    const song = (share: { available: boolean; enabled: boolean } | undefined, hasSungTrack: boolean) =>
+      shareBlockedReason({ share, hasSungTrack });
+    return [
+      shareBlockedReason(null),
+      song({ available: false, enabled: false }, true),
+      song({ available: false, enabled: true }, true),
+      song({ available: true, enabled: false }, false),
+      song({ available: true, enabled: true }, false),
+      song({ available: true, enabled: false }, true),
+      song(undefined, false),
+      song(undefined, true),
+    ];
+  });
+  expect(reasons).toEqual([
+    "Upload a score and sing a part to share it",
+    "Sharing isn't available for this account",
+    "Sharing isn't available for this account",
+    "Sing a part to share this song",
+    null,  // a live link can still be copied or turned off
+    null,
+    "Sing a part to share this song",
+    "Checking sharing…",
+  ]);
+});
 
 test("start rows: the owner's mute, solo and bus decide where each row starts", async ({ page }) => {
   await page.goto("/");
@@ -396,7 +426,10 @@ test("My songs marks a shared Song, and its Share action turns the link off ther
   const drawer = page.getByRole("dialog", { name: "My songs" });
   const songRow = drawer.getByTestId("song-row").filter({ hasText: TITLE });
   await expect(songRow.getByText("Shared", { exact: true })).toBeVisible();
+  // The dialog reads the info alone: opening the whole Song would move it up My songs.
+  const infoRead = page.waitForRequest((req) => new URL(req.url()).pathname === `/songs/${SONG}/info`);
   await songRow.getByRole("button", { name: "Share" }).click();
+  await infoRead;
   await expect(shareBox(page).getByRole("textbox", { name: "Share link" })).toHaveValue(/\/s\/tok/);
   const info = shareBox(page).getByRole("region", { name: "Song info" });
   await expect(info).toContainText("Made-up Composer");

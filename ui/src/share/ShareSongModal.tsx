@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
-import { ApiError, fetchWorkspace, shareSong, SONG_LICENSES, type SongInfoFields, unshareSong } from "../api";
+import { ApiError, fetchSongInfo, shareSong, SONG_LICENSES, type SongInfoFields, unshareSong } from "../api";
 import "./ShareSongModal.css";
 
 export type ShareState = { enabled: boolean; url: string | null };
@@ -16,6 +16,22 @@ interface ShareSongModalProps {
   onShareChange: (songId: string, share: ShareState) => void;
   /** Opens the Song info panel; given only for the Song open on the page. */
   onEditInfo?: () => void;
+}
+
+/**
+ * Why a Song's Share button is off, for its tooltip, or null when it can be shared.
+ * A Song with a live link can always open it, to copy the link or turn it off.
+ */
+export function shareBlockedReason(
+  song: { share?: { available: boolean; enabled: boolean } | null; hasSungTrack: boolean } | null
+): string | null {
+  if (!song) return "Upload a score and sing a part to share it";
+  if (song.share && !song.share.available) return "Sharing isn't available for this account";
+  if (song.share?.enabled) return null;
+  if (!song.hasSungTrack) return "Sing a part to share this song";
+  // The open Song's share state is read once it has a sung part.
+  if (!song.share) return "Checking sharing…";
+  return null;
 }
 
 type View =
@@ -69,9 +85,9 @@ export default function ShareSongModal({
   useEffect(() => {
     if (!linkReady) return;
     let cancelled = false;
-    void fetchWorkspace(songId)
-      .then(({ song }) => {
-        if (!cancelled) setSongInfo({ songId, info: song.info ?? null });
+    void fetchSongInfo(songId)
+      .then((fresh) => {
+        if (!cancelled) setSongInfo({ songId, info: fresh });
       })
       .catch(() => {
         if (!cancelled) setSongInfo({ songId, info: null });

@@ -96,7 +96,7 @@ import { noticeInBackground } from "./tabNotice";
 import { UserMenu } from "./components/UserMenu";
 import SongsDrawer from "./components/SongsDrawer";
 import NewSongOrReplaceModal from "./components/NewSongOrReplaceModal";
-import ShareSongModal, { type ShareState } from "./share/ShareSongModal";
+import ShareSongModal, { shareBlockedReason, type ShareState } from "./share/ShareSongModal";
 import SongInfoPanel from "./components/SongInfoPanel";
 import { logAnalyticsEvent } from "./firebase";
 import { useCredits } from "./hooks/useCredits";
@@ -2827,6 +2827,7 @@ export default function MainApp() {
   // A Song started by an upload has no share state yet. Once it has a sung part, read it
   // from the workspace, once per Song.
   const hasSungTrack = multiTrackAudioTracks.length > 0;
+  const shareBlocked = shareBlockedReason(currentSong ? { share: currentSong.share, hasSungTrack } : null);
   useEffect(() => {
     const songId = currentSong?.id;
     if (!songId || currentSong?.share || !hasSungTrack) return;
@@ -6636,7 +6637,7 @@ export default function MainApp() {
                   className="score-action-button"
                   data-testid="share-song"
                   data-tour="share-song"
-                  disabled={!(currentSong?.share?.available && (hasSungTrack || currentSong.share.enabled))}
+                  disabled={shareBlocked !== null}
                   onClick={() => {
                     if (!currentSong) return;
                     setShareBoxSong({
@@ -6646,7 +6647,7 @@ export default function MainApp() {
                     });
                   }}
                   aria-label="Share song"
-                  title="Share song"
+                  title={shareBlocked ?? "Share song"}
                 >
                   <Share2 size={16} />
                 </button>

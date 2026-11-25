@@ -993,6 +993,28 @@ def create_app() -> FastAPI:
             "player": player_payload,
         }
 
+    @app.get("/songs/{session_id}/info")
+    async def get_song_info(session_id: str, request: Request) -> Any:
+        """The Song's info alone, for a dialog that shows it: no chat, score or signed audio,
+        and reading it leaves the Song's place in My songs as it was."""
+        sessions: SessionStore = request.app.state.sessions
+        user_id = await _get_user_id_or_401(request)
+        try:
+            data, player = await sessions.read_song_info(session_id, user_id)
+        except (KeyError, PermissionError):
+            return _song_error(404, "song_not_found", "song.not_found")
+        job_ids = [str(track.get("sourceJobId")) for track in (player or {}).get("vocals") or []
+                   if track.get("sourceJobId")]
+        jobs = await asyncio.to_thread(request.app.state.job_store.get_jobs, job_ids)
+        # The same usable tracks as the workspace's player, so both show the same voices.
+        tracks = songs.usable_vocals(
+            player, score_id=data.get("scoreId"), score_summary=data.get("scoreSummary"), jobs_by_id=jobs
+        )
+        return songs.song_info_response(
+            data.get("songInfo"), title=data.get("title"),
+            voices=songs.voice_names(track for track, _ in tracks),
+        )
+
     @app.post("/songs/{session_id}/share")
     async def turn_share_on(session_id: str, request: Request) -> Any:
         user_id, user_email = await _get_user_context_or_401(request)

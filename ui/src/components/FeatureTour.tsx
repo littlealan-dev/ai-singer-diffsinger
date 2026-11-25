@@ -233,9 +233,9 @@ export default function FeatureTour({ paused }: { paused: boolean }) {
     const visibility = new IntersectionObserver(schedule);
     const observer = new MutationObserver(schedule);
     find();
-    observer.observe(document.body, {
-      childList: true, subtree: true, attributes: true, attributeFilter: ["class", "hidden", "data-tour"],
-    });
+    // Only controls being added or removed: class changes, like the playback highlight's,
+    // would rescan on every beat. Targets scrolling in or out come from `visibility`.
+    observer.observe(document.body, { childList: true, subtree: true });
     window.addEventListener("resize", schedule);
     document.addEventListener("scroll", schedule, true);
     return () => {
@@ -255,8 +255,11 @@ export default function FeatureTour({ paused }: { paused: boolean }) {
       if (bubbleRef.current) setPlacement(measureBubble(element, bubbleRef.current));
     };
     const next = () => acknowledge(step.target);
+    // Escape closes the tour only from inside the tip: Escape in a dialog or a rename is theirs.
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") acknowledge();
+      if (event.key === "Escape" && event.target instanceof Node && bubbleRef.current?.contains(event.target)) {
+        acknowledge();
+      }
     };
     place();
     element.addEventListener("click", next);

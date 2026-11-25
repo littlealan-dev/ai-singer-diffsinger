@@ -1044,6 +1044,11 @@ export async function renameSong(songId: string, title: string): Promise<SongRow
   });
 }
 
+/** The Song's info alone. Unlike opening the Song, reading it keeps the Song's place in My songs. */
+export async function fetchSongInfo(songId: string): Promise<SongInfoFields> {
+  return request<SongInfoFields>(`/songs/${songId}/info`, { method: "GET" });
+}
+
 /** Rename the Song and edit its info in one request. */
 export async function updateSongInfo(
   songId: string,

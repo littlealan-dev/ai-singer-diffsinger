@@ -113,6 +113,11 @@ test("the new tips wait for the announcement and for visible controls", async ({
   const share = page.getByTestId("share-song");
   await expect(share).toBeVisible();
   await expect(share).toBeDisabled();
+  await expect(share).toHaveAttribute("title", "Upload a score and sing a part to share it");
+  // Escape outside the tip, as when closing a dialog, leaves the tips alone.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press("Escape");
+  await expect(tour(page).locator(".feature-tour-title")).toHaveText("My songs");
 
   const offscreen = await page.addStyleTag({ content: '[data-tour="share-song"] { position: fixed; top: 110vh; }' });
   await tour(page).getByRole("button", { name: "Next" }).click();
