@@ -1,6 +1,6 @@
 import { initializeApp } from "firebase/app";
 import {
-  getAnalytics,
+  initializeAnalytics,
   logEvent,
   setUserProperties,
   type Analytics,
@@ -96,10 +96,25 @@ function analyticsConsented(): boolean {
   }
 }
 
+function analyticsPage() {
+  const { origin, pathname } = window.location;
+  // Once these pages load, their paths or titles can contain private Song data.
+  const path = pathname.startsWith("/s/") ? "/s"
+    : pathname.startsWith("/app/") ? "/app"
+    : pathname.startsWith("/jobs/") ? "/jobs"
+    : pathname;
+  return {
+    page_location: origin + path,
+    page_path: path,
+    page_title: "SightSinger",
+    page_referrer: document.referrer ? new URL(document.referrer).origin : "",
+  };
+}
+
 export function initAnalytics(): Analytics | null {
   if (!analyticsConsented() || !app || !firebaseConfig.measurementId) return null;
   if (!analytics) {
-    analytics = getAnalytics(app);
+    analytics = initializeAnalytics(app, { config: analyticsPage() });
     if (import.meta.env.VITE_APP_ENV) {
       setUserProperties(analytics, { env: import.meta.env.VITE_APP_ENV });
     }
@@ -121,9 +136,7 @@ export function logPageView(instance?: Analytics | null) {
   }
   const env = import.meta.env.VITE_APP_ENV as string | undefined;
   logEvent(active, "page_view", {
-    page_location: window.location.href,
-    page_path: window.location.pathname + window.location.search,
-    page_title: document.title,
+    ...analyticsPage(),
     ...(env ? { env } : {}),
   });
 }

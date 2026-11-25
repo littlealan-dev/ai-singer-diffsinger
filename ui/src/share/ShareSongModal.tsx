@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { ApiError, fetchSongInfo, shareSong, SONG_LICENSES, type SongInfoFields, unshareSong } from "../api";
+import { shareLinkCopied, shareLinkCreated, shareTurnedOff } from "../analytics";
 import "./ShareSongModal.css";
+
+// The API does not return a creation timestamp for existing links.
+const createdLinks = new Map<string, number>();
 
 export type ShareState = { enabled: boolean; url: string | null };
 
@@ -10,6 +14,8 @@ interface ShareSongModalProps {
   title: string;
   /** The link, when the Song's sharing is already on: the box opens on it without a request. */
   url: string | null;
+  /** The drawer can know a link exists before it has obtained its URL. */
+  alreadyShared?: boolean;
   /** Info the open Song already has, while the dialog reads the current values. */
   initialInfo?: SongInfoFields;
   onClose: () => void;
@@ -46,7 +52,7 @@ type View =
  * Turning a link off ends it for good; sharing again makes a new one.
  */
 export default function ShareSongModal({
-  songId, title, url, initialInfo, onClose, onShareChange, onEditInfo,
+  songId, title, url, alreadyShared = Boolean(url), initialInfo, onClose, onShareChange, onEditInfo,
 }: ShareSongModalProps) {
   const [view, setView] = useState<View>(url ? { kind: "link", url, copied: false } : { kind: "loading" });
   const [songInfo, setSongInfo] = useState<{ songId: string; info: SongInfoFields | null } | null>(null);
@@ -60,6 +66,10 @@ export default function ShareSongModal({
     try {
       const result = await shareSong(songId, noticeAccepted);
       if (!result.url) throw new Error("The share link is missing.");
+      if (!alreadyShared && !createdLinks.has(result.url)) {
+        createdLinks.set(result.url, Date.now());
+        shareLinkCreated(noticeAccepted);
+      }
       onShareChangeRef.current(songId, { enabled: true, url: result.url });
       setView({ kind: "link", url: result.url, copied: false });
     } catch (err) {
@@ -98,6 +108,7 @@ export default function ShareSongModal({
   }, [linkReady, songId]);
 
   const copy = async (link: string) => {
+    shareLinkCopied("dialog");
     try {
       await navigator.clipboard.writeText(link);
       setView({ kind: "link", url: link, copied: true });
@@ -110,6 +121,9 @@ export default function ShareSongModal({
     setView({ kind: "confirm-off", url: link, turningOff: true });
     try {
       await unshareSong(songId);
+      const createdAt = createdLinks.get(link);
+      createdLinks.delete(link);
+      shareTurnedOff(createdAt === undefined ? undefined : (Date.now() - createdAt) / 1000);
       onShareChangeRef.current(songId, { enabled: false, url: null });
       onClose();
     } catch (err) {

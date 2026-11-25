@@ -20,6 +20,12 @@ import {
   type SingAllRetryQuote,
   type SingAllRow,
 } from "../api";
+import {
+  singAllCardOpen, singAllDecision, singAllQuoteChanged, singAllQuoteShown, singAllRetryStart,
+  singAllStart, singAllStartRefused, singAllTopupClick, singAllUpgradeClick,
+  singAllZipDownload, singAllZipDownloadFailed, type SingAllQuoteField,
+} from "../analytics";
+import type { BillingPlanKey } from "../billing/plans";
 import "./SingAllCard.css";
 
 // The Sing All card (docs/specs/sing-all-core-step3-spec.md, S3, and its API contract).
@@ -39,7 +45,9 @@ type SingAllCardProps = {
   onOpenSong: (songId: string) => void;
   onTopUp: () => void;
   onUpgrade: () => void;
-  onStop: (songId: string) => Promise<void>;
+  onStop: (job: SingAllProgress) => Promise<void>;
+  planKey: BillingPlanKey;
+  demoSong: boolean;
   // Changes when the owner's plan or available credits change, e.g. "plus:42".
   billingKey?: string;
   // Step 6: a decision or retry answered with fresh progress, a retry started, a job opened by id.
@@ -172,6 +180,18 @@ export default function SingAllCard(props: SingAllCardProps) {
   return <SingAllQuoteView {...props} />;
 }
 
+function analyticsCounts(quote: SingAllQuote) {
+  const singing = quote.lines.find((line) => line.kind === "singing");
+  return {
+    parts: singing?.parts ?? 0,
+    splits: new Set(quote.rows.filter((row) => row.include && row.split).map((row) => row.sourcePartId)).size,
+    takes: singing?.takes ?? 0,
+    mode: quote.options.mode,
+    mixes: quote.options.mixes ?? ("none" as const),
+    credits: quote.total,
+  };
+}
+
 function SingAllQuoteView({
   songId,
   songTitle,
@@ -181,6 +201,8 @@ function SingAllQuoteView({
   onTopUp,
   onUpgrade,
   billingKey,
+  planKey,
+  demoSong,
 }: SingAllCardProps) {
   const defaults = useMemo<SingAllChoices>(
     () => ({ language: open?.language ?? "en", solfegeOnly: open?.solfegeOnly ?? false }),
@@ -201,6 +223,17 @@ function SingAllQuoteView({
   const [totalChange, setTotalChange] = useState<number | null>(null);
   const previousTotal = useRef<number | null>(null);
   const requestSeq = useRef(0);
+  const cardReported = useRef(false);
+  const shownQuotes = useRef(new Set<string>());
+  const startedJobs = useRef(new Set<string>());
+  const firstQuote = useRef<SingAllQuote | null>(null);
+  const recommendedVoices = useRef(new Map<string, string>());
+
+  useEffect(() => {
+    if (cardReported.current) return;
+    cardReported.current = true;
+    singAllCardOpen(demoSong, planKey);
+  }, [demoSong, planKey]);
 
   // Every change asks for a new quote; the last one asked for wins.
   const askQuote = useCallback(
@@ -211,7 +244,17 @@ function SingAllQuoteView({
       try {
         const response = await requestSingAllQuote(songId, next);
         if (seq !== requestSeq.current) return;
-        setState(isSingAllQuote(response) ? { kind: "ready", quote: response } : { kind: "blocked", blocked: response });
+        if (isSingAllQuote(response)) {
+          firstQuote.current ??= response;
+          for (const row of response.rows) {
+            if (row.voicePicked === "recommended") {
+              recommendedVoices.current.set(`${response.options.language}:${row.rowId}`, row.voice);
+            }
+          }
+          setState({ kind: "ready", quote: response });
+        } else {
+          setState({ kind: "blocked", blocked: response });
+        }
       } catch {
         if (seq !== requestSeq.current) return;
         setState({ kind: "failed" });
@@ -236,6 +279,18 @@ function SingAllQuoteView({
   }, [billingKey, state, choices, askQuote]);
 
   const quote = state.kind === "ready" ? state.quote : null;
+  useEffect(() => {
+    if (!quote || shownQuotes.current.has(quote.quoteId)) return;
+    shownQuotes.current.add(quote.quoteId);
+    const splitStaffs = new Set(quote.rows.flatMap((row) => {
+      const staff = row.split ? row.rowId.match(/:staff([^:]+):/)?.[1] : undefined;
+      return staff ? [`${row.sourcePartId}:${staff}`] : [];
+    }));
+    singAllQuoteShown(
+      analyticsCounts(quote), splitStaffs.size, quote.options.repeats, quote.total <= quote.balance,
+    );
+  }, [quote]);
+
   const shownTotal = quote?.total ?? null;
   useEffect(() => {
     const previous = previousTotal.current;
@@ -273,7 +328,13 @@ function SingAllQuoteView({
       ...patch,
     });
   };
-  const customise = (patch: Partial<SingAllChoices>) => {
+  const customise = (patch: Partial<SingAllChoices>, field: SingAllQuoteField) => {
+    if (!quote) return;
+    if (field === "voice" || field === "include_part") {
+      singAllQuoteChanged(field);
+    } else if (field === "mode" || field === "verse" || field === "repeats" || field === "mixes" || field === "language") {
+      if (patch[field] !== quote.options[field]) singAllQuoteChanged(field);
+    }
     setUserChanged(true);
     change(patch);
   };
@@ -283,17 +344,30 @@ function SingAllQuoteView({
       rows: quote.rows.map(({ rowId: id, include, voice, voicePicked }) =>
         id === rowId ? { rowId: id, include, voice, voicePicked, ...patch } : { rowId: id, include, voice, voicePicked }
       ),
-    });
+    }, patch.include !== undefined ? "include_part" : "voice");
   };
   const apply = () => {
     setCustomising(false);
     setDetailsOpen(false);
     const note = styleDraft.trim();
+    if (note !== appliedNote) singAllQuoteChanged("style");
     setAppliedNote(note);
     if (note) setUserChanged(true);
     if (quote) change({ styleNote: note || undefined });
   };
   const reset = () => {
+    const initial = firstQuote.current;
+    if (quote && initial) {
+      for (const field of ["mode", "verse", "repeats", "mixes", "language"] as const) {
+        if (quote.options[field] !== initial.options[field]) singAllQuoteChanged(field);
+      }
+      if (quote.rows.some((row) => row.voicePicked === "user")) singAllQuoteChanged("voice");
+      if (quote.rows.some((row) => {
+        const original = initial.rows.find((candidate) => candidate.rowId === row.rowId);
+        return original && original.include !== row.include;
+      })) singAllQuoteChanged("include_part");
+    }
+    if (appliedNote) singAllQuoteChanged("style");
     setStyleDraft("");
     setAppliedNote("");
     setQuoteChangedLine(false);
@@ -307,10 +381,26 @@ function SingAllQuoteView({
     setStartError(null);
     try {
       const progress = await startSingAll(quote.quoteId);
+      if (!startedJobs.current.has(progress.jobId)) {
+        startedJobs.current.add(progress.jobId);
+        const voiceChanged = quote.rows.some((row) => {
+          if (row.voicePicked !== "user") return false;
+          const recommended = recommendedVoices.current.get(`${quote.options.language}:${row.rowId}`);
+          return recommended === undefined || row.voice !== recommended;
+        });
+        const counts = analyticsCounts(quote);
+        singAllStart({
+          ...counts,
+          takes: progress.counts?.takes.total ?? counts.takes,
+          splits: progress.counts?.splits.total ?? counts.splits,
+          credits: progress.credits?.reserved ?? quote.total,
+        }, voiceChanged);
+      }
       // Until the S3 backend lands, the answer is the job record; only its id is relied on.
       onStarted(progress.jobId, "counts" in progress ? progress : null);
     } catch (err) {
       const code = err instanceof ApiError ? err.code : undefined;
+      singAllStartRefused(code);
       if (code === "quote_changed") {
         change({ styleNote: appliedNote || undefined }, { quoteChanged: true });
       } else if (code === "sing_all_already_running" && err instanceof ApiError) {
@@ -518,11 +608,17 @@ function SingAllQuoteView({
 
   const actionButton =
     q.blocked === "free_plan" ? (
-      <button type="button" className="selection-send" data-tour="sing-all-action" onClick={onUpgrade}>
+      <button type="button" className="selection-send" data-tour="sing-all-action" onClick={() => {
+        singAllUpgradeClick(q.total - q.balance, planKey);
+        onUpgrade();
+      }}>
         Upgrade to sing
       </button>
     ) : notEnough ? (
-      <button type="button" className="selection-send" onClick={onTopUp}>
+      <button type="button" className="selection-send" onClick={() => {
+        singAllTopupClick(q.total - q.balance, planKey);
+        onTopUp();
+      }}>
         Top up
       </button>
     ) : q.blocked === "style_unavailable" ? (
@@ -575,7 +671,7 @@ function SingAllQuoteView({
           value={q.options.language}
           aria-label="Language"
           disabled={q.options.solfegeOnly || pending}
-          onChange={(event) => customise({ language: event.target.value })}
+          onChange={(event) => customise({ language: event.target.value }, "language")}
         >
           {languages.map((language) => (
             <option key={language.code} value={language.code}>
@@ -642,7 +738,7 @@ function SingAllQuoteView({
               className={clsx(q.options.mode === value && "active")}
               aria-pressed={q.options.mode === value}
               disabled={pending || (q.options.solfegeOnly && value !== "solfege")}
-              onClick={() => customise({ mode: value })}
+              onClick={() => customise({ mode: value }, "mode")}
             >
               {MODE_LABEL[value]}
             </button>
@@ -660,7 +756,7 @@ function SingAllQuoteView({
             value={q.options.verse}
             aria-label="Verse"
             disabled={pending}
-            onChange={(event) => customise({ verse: event.target.value })}
+            onChange={(event) => customise({ verse: event.target.value }, "verse")}
           >
             {q.options.verses.map((verse) => (
               <option key={verse} value={verse}>
@@ -689,7 +785,7 @@ function SingAllQuoteView({
                 className={clsx(q.options.repeats === value && "active")}
                 aria-pressed={q.options.repeats === value}
                 disabled={pending || (value && !q.options.repeatsAvailable)}
-                onClick={() => customise({ repeats: value })}
+                onClick={() => customise({ repeats: value }, "repeats")}
               >
                 {label}
               </button>
@@ -710,7 +806,7 @@ function SingAllQuoteView({
                 className={clsx(shownMixes === value && "active")}
                 aria-pressed={shownMixes === value}
                 disabled={pending}
-                onClick={() => customise({ mixes: value })}
+                onClick={() => customise({ mixes: value }, "mixes")}
               >
                 {label}
               </button>
@@ -872,6 +968,7 @@ function DecisionPanel({
   onJobUpdated?: (job: SingAllProgress) => void;
 }) {
   const decision = job.decision!;
+  const answered = useRef(false);
   // "Sing as it is" starts ticked: these are the parts the user paid for (spec Q2).
   const [accepted, setAccepted] = useState<Set<string>>(
     () => new Set(decision.parts.filter((part) => part.state === "review").map((part) => part.sourcePartId))
@@ -888,7 +985,18 @@ function DecisionPanel({
     setBusy(true);
     setError(null);
     try {
-      onJobUpdated?.(await answerSingAllDecision(job.jobId, request));
+      const updated = await answerSingAllDecision(job.jobId, request);
+      const firstPart = decision.parts[0];
+      if (firstPart && !answered.current) {
+        answered.current = true;
+        singAllDecision(
+          request.action,
+          decision.parts.length,
+          request.action === "continue" ? request.accept.length : 0,
+          firstPart.reason,
+        );
+      }
+      onJobUpdated?.(updated);
     } catch (err) {
       const code = err instanceof ApiError ? err.code : undefined;
       const fresh = err instanceof ApiError ? (err.detail.job as SingAllProgress | undefined) : undefined;
@@ -1015,6 +1123,7 @@ function RetryPanel({
   onUpgrade: () => void;
 }) {
   const [state, setState] = useState<RetryState>({ kind: "idle" });
+  const startedRetries = useRef(new Set<string>());
 
   const open = async () => {
     setState({ kind: "loading" });
@@ -1028,7 +1137,12 @@ function RetryPanel({
   const start = async (quote: SingAllRetryQuote) => {
     setState({ kind: "quote", quote, changed: false, starting: true });
     try {
-      onRetryStarted?.(await startSingAllRetry(job.jobId, quote.total));
+      const retry = await startSingAllRetry(job.jobId, quote.total);
+      if (!startedRetries.current.has(retry.jobId)) {
+        startedRetries.current.add(retry.jobId);
+        singAllRetryStart(quote.takes.length, retry.credits?.reserved ?? quote.total);
+      }
+      onRetryStarted?.(retry);
       setState({ kind: "idle" });
     } catch (err) {
       const fresh = err instanceof ApiError ? (err.detail.quote as SingAllRetryQuote | undefined) : undefined;
@@ -1140,9 +1254,11 @@ export function SingAllDownloadButton({ jobId, compact = false }: { jobId: strin
     setError(null);
     try {
       const { url } = await fetchSingAllDownload(jobId);
+      singAllZipDownload(compact ? "score_bar" : "card");
       window.location.assign(url);
     } catch (err) {
       const code = err instanceof ApiError ? err.code : undefined;
+      singAllZipDownloadFailed(code);
       setError(
         code === "zip_unavailable" || code === "job_not_found"
           ? "The zip isn't available."
@@ -1262,7 +1378,7 @@ function SingAllJobView({
   const stop = async () => {
     setStopping(true);
     try {
-      await onStop(job.songId);
+      await onStop(job);
     } finally {
       setStopping(false);
       setConfirmStop(false);

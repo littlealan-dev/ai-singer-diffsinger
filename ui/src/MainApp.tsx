@@ -93,6 +93,7 @@ import { ScorePlayerEngine, withoutKeysOutside, type ScorePlayerPlaybackControls
 import CreditsHeader from "./components/CreditsHeader";
 import SingAllCard, { SingAllDownloadButton } from "./components/SingAllCard";
 import { noticeInBackground } from "./tabNotice";
+import { shareDialogOpen, singAllStop, singAllTabReturn, songInfoOpened } from "./analytics";
 import { UserMenu } from "./components/UserMenu";
 import SongsDrawer from "./components/SongsDrawer";
 import NewSongOrReplaceModal from "./components/NewSongOrReplaceModal";
@@ -4139,6 +4140,13 @@ export default function MainApp() {
     requestChatAutoScroll();
   };
 
+  const reportedSingAllStops = useRef(new Set<string>());
+  const recordSingAllStop = (job: SingAllProgress) => {
+    if (job.stage === "done" || reportedSingAllStops.current.has(job.jobId)) return;
+    reportedSingAllStops.current.add(job.jobId);
+    singAllStop(job.stage, job.elapsedS);
+  };
+
   const handleStopWork = async () => {
     if (!sessionId || stopRequestInFlight) return;
     if (!chatTurnInProgressRef.current && !singAllRunningHere) return;
@@ -4208,7 +4216,7 @@ export default function MainApp() {
       if (job.status === "running" || job.status === "needs_decision") return;
       if (!singAllSeenRunningRef.current.has(job.jobId) || singAllNoticedRef.current.has(job.jobId)) return;
       singAllNoticedRef.current.add(job.jobId);
-      noticeInBackground();
+      noticeInBackground(singAllTabReturn);
     });
   }, [singAllJobs]);
 
@@ -4322,9 +4330,10 @@ export default function MainApp() {
     if (job.retryOf) loadSingAllJob(job.retryOf);
   };
 
-  const handleSingAllStop = async (songId: string) => {
+  const handleSingAllStop = async (job: SingAllProgress) => {
+    recordSingAllStop(job);
     try {
-      const response = await stopSessionWork(songId);
+      const response = await stopSessionWork(job.songId);
       if (response.singAll?.result === "too_late") {
         setNotice("Too late to stop: it's just finishing");
       }
@@ -5654,7 +5663,10 @@ export default function MainApp() {
                 data-testid="song-info-open"
                 title="Song info"
                 aria-label="Song info"
-                onClick={() => setSongInfoOpen(true)}
+                onClick={() => {
+                  songInfoOpened("title");
+                  setSongInfoOpen(true);
+                }}
               >
                 <Info size={15} aria-hidden="true" />
               </button>
@@ -5987,6 +5999,8 @@ export default function MainApp() {
                     onTopUp={() => openPaywall("sing_all_topup")}
                     onUpgrade={() => openPaywall("sing_all_upgrade")}
                     billingKey={`${billing.activePlanKey}:${available}`}
+                    planKey={billing.activePlanKey}
+                    demoSong={activeDemoSongId !== null}
                     onStop={handleSingAllStop}
                     onJobUpdated={handleSingAllJobUpdated}
                     onRetryStarted={handleSingAllRetryStarted}
@@ -6099,7 +6113,10 @@ export default function MainApp() {
                     type="button"
                     className="selection-send"
                     disabled={stopRequestInFlight}
-                    onClick={() => void handleStopWork()}
+                    onClick={() => {
+                      if (activeSingAll) recordSingAllStop(activeSingAll);
+                      void handleStopWork();
+                    }}
                   >
                     Stop
                   </button>
@@ -6640,6 +6657,7 @@ export default function MainApp() {
                   disabled={shareBlocked !== null}
                   onClick={() => {
                     if (!currentSong) return;
+                    shareDialogOpen("song_bar");
                     setShareBoxSong({
                       id: currentSong.id,
                       title: currentSong.title,
@@ -6876,6 +6894,7 @@ export default function MainApp() {
             currentSong?.info && shareBoxSong.id === currentSong.id
               ? () => {
                   setShareBoxSong(null);
+                  songInfoOpened("share_dialog");
                   setSongInfoOpen(true);
                 }
               : undefined
