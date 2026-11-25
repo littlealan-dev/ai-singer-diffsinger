@@ -165,10 +165,10 @@ async function mockShare(page: Page, isOwner = false) {
   return audioRequests;
 }
 
-test("Accept enables feature events on a shared Song without sending its URL or title", async ({ page }) => {
+test("Accept preserves campaign attribution without sending the shared Song's private data", async ({ page }) => {
   await probeAnalytics(page);
   await mockShare(page);
-  await page.goto(`/s/${TOKEN}?utm_source=test&song=${SONG_ID}&job=${JOB_ID}`);
+  await page.goto(`/s/${TOKEN}?utm_source=test&song=${SONG_ID}&job=${JOB_ID}&utm_private=${TOKEN}`);
   await expect(page.getByRole("heading", { name: SONG_TITLE })).toBeVisible();
   expect(await captured(page)).toEqual([]);
   await page.getByRole("button", { name: "Accept", exact: true }).click();
@@ -176,7 +176,13 @@ test("Accept enables feature events on a shared Song without sending its URL or 
   await expect.poll(() => events(page, "share_control_use")).toEqual([{ control: "info_fold", env: "dev" }]);
   const calls = await captured(page);
   const config = calls.find(([kind]) => kind === "config")?.[2];
-  expect(config).toMatchObject({ page_location: new URL("/s", page.url()).href, page_title: "SightSinger" });
+  const pageMetadata = {
+    page_location: new URL("/s?utm_source=test", page.url()).href,
+    page_path: "/s?utm_source=test",
+    page_title: "SightSinger",
+  };
+  expect(config).toMatchObject(pageMetadata);
+  await expect.poll(() => events(page, "page_view")).toMatchObject([pageMetadata]);
   const serialized = JSON.stringify(calls);
   for (const privateValue of [TOKEN, SONG_ID, SONG_TITLE, JOB_ID, "Private composer", "Private voice"]) {
     expect(serialized).not.toContain(privateValue);
@@ -229,7 +235,7 @@ test("the owner never sends the play-count query flag", async ({ page }) => {
   expect(audio.every((request) => !request.searchParams.has("first"))).toBe(true);
 });
 
-async function mountSingAllHarness(page: Page) {
+async function mountSingAllHarness(page: Page, startError?: string) {
   await page.route("**/src/App.tsx", async (route) => {
     const response = await route.fetch();
     const transformed = await response.text();
@@ -255,6 +261,7 @@ async function mountSingAllHarness(page: Page) {
     const request = route.request();
     if (request.method() === "OPTIONS") return route.fulfill({ status: 204 });
     if (new URL(request.url()).pathname === "/sing-all/jobs") {
+      if (startError) return route.fulfill({ status: 409, json: { detail: { code: startError } } });
       return route.fulfill({ json: { jobId: JOB_ID, credits: { reserved: 3 } } });
     }
     const choices = request.postDataJSON().choices;
@@ -308,4 +315,13 @@ test("Sing All reports the card once, each displayed quote once, and a started j
   for (const privateValue of [SONG_ID, SONG_TITLE, JOB_ID, "Private part", "Private voice", "fixture-quote-"]) {
     expect(serialized).not.toContain(privateValue);
   }
+});
+
+test("Sing All reports a start refused because another job is running as song_busy", async ({ page }) => {
+  await probeAnalytics(page, true);
+  await mountSingAllHarness(page, "sing_all_already_running");
+  const card = page.getByTestId("sing-all-card");
+  await card.getByTestId("sing-all-sing-it").click();
+  await expect.poll(() => events(page, "sing_all_start_refused")).toEqual([{ code: "song_busy", env: "dev" }]);
+  expect(await events(page, "sing_all_start")).toEqual([]);
 });

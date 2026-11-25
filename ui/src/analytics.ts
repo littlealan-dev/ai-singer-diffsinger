@@ -81,8 +81,9 @@ export function singAllStart(quote: QuoteCounts, voiceChanged: boolean) {
 }
 
 export function singAllStartRefused(code?: string) {
+  const reason = code === "sing_all_already_running" ? "song_busy" : code;
   logAnalyticsEvent("sing_all_start_refused", {
-    code: code === "quote_changed" || code === "not_enough_credits" || code === "song_busy" ? code : "other",
+    code: reason === "quote_changed" || reason === "not_enough_credits" || reason === "song_busy" ? reason : "other",
   });
 }
 
