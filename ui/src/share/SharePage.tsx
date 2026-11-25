@@ -12,6 +12,8 @@ import {
   fetchShareScore,
   type PerformanceMeasureMapEntry,
   type SharePageData,
+  SONG_LICENSES,
+  type SongInfoFields,
 } from "../api";
 import { useAuth } from "../hooks/useAuth";
 import { createPerformanceMeasureLookup, positionNativeScoreCursor } from "../scorePlayback";
@@ -372,7 +374,10 @@ function SharedSong({ data }: { data: SharePageData }) {
   return (
     <main className="share-song">
       <div className="share-song-title-row">
-        <h1 className="share-song-title">{data.title}</h1>
+        <div className="share-song-heading">
+          <h1 className="share-song-title">{data.title}</h1>
+          {data.info?.subtitle ? <p className="share-song-subtitle">{data.info.subtitle}</p> : null}
+        </div>
         <button type="button" className="btn-secondary-inline" onClick={() => void copyLink()}>
           <Share2 size={15} aria-hidden="true" /> {copied ? "Link copied" : "Share"}
         </button>
@@ -538,7 +543,10 @@ function SharedSong({ data }: { data: SharePageData }) {
                 ))
               : null}
           </ul>
-          {data.credits.voices.length ? (
+          {data.info ? (
+            <ShareSongInfo info={data.info} />
+          ) : data.credits.voices.length ? (
+            // A backend from before Song Info.
             <p className="share-song-credits">
               Voices: {data.credits.voices.join(", ")} ·{" "}
               <a href="/credits-and-ai-voices">Credits and AI voices</a>
@@ -603,3 +611,68 @@ function SharedSong({ data }: { data: SharePageData }) {
 }
 
 const noop = () => undefined;
+
+
+/** The Song's credits, license and description, under Parts; empty fields are left out. */
+function ShareSongInfo({ info }: { info: SongInfoFields }) {
+  const [open, setOpen] = useState(true);
+  const license = SONG_LICENSES[info.license] ?? SONG_LICENSES.all_rights_reserved;
+  const rows: Array<[string, string]> = [
+    ["Composer", info.composer],
+    ["Lyrics by", info.lyricist],
+    ["Arranger", info.arranger],
+    ["Credits", info.credits ?? ""],
+    ["Produced by", info.producer],
+  ];
+  return (
+    <div className="share-song-info">
+      <button
+        type="button"
+        className="share-song-parts-toggle"
+        aria-expanded={open}
+        aria-controls="share-song-info-body"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <ChevronDown size={16} aria-hidden="true" className="share-song-parts-chevron" />
+        <span>Song info</span>
+      </button>
+      <div id="share-song-info-body" className="share-song-info-body" hidden={!open}>
+        <dl className="share-song-info-list">
+          {rows.filter(([, value]) => value).map(([label, value]) => (
+            <div key={label}>
+              <dt>{label}</dt>
+              <dd>{value}</dd>
+            </div>
+          ))}
+          {info.voices.length ? (
+            <div>
+              <dt>Voices</dt>
+              <dd>
+                {info.voices.join(", ")} · <a href="/credits-and-ai-voices">Credits and AI voices</a>
+              </dd>
+            </div>
+          ) : null}
+          <div>
+            <dt>License</dt>
+            <dd>
+              {license.url ? (
+                <a href={license.url} target="_blank" rel="noreferrer license">
+                  {license.label}
+                </a>
+              ) : (
+                license.label
+              )}
+            </dd>
+          </div>
+          {info.score_copyright ? (
+            <div>
+              <dt>Score copyright</dt>
+              <dd>{info.score_copyright}</dd>
+            </div>
+          ) : null}
+        </dl>
+        {info.description ? <p className="share-song-description">{info.description}</p> : null}
+      </div>
+    </div>
+  );
+}

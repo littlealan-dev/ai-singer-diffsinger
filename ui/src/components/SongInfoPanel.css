@@ -1,0 +1,117 @@
+/* The Song info panel: a side sheet on a wide screen, the whole screen on a phone. */
+.song-info-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(13, 11, 24, 0.6);
+  backdrop-filter: blur(12px);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 10000;
+}
+
+.song-info-panel {
+  width: min(440px, 100%);
+  height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 20px;
+  background: linear-gradient(160deg, var(--bg-1) 0%, var(--bg-0) 100%);
+  color: var(--text-strong);
+  box-shadow: -24px 0 60px rgba(0, 0, 0, 0.5), inset 1px 0 0 var(--glass-border);
+}
+
+.song-info-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.song-info-header h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.song-info-close {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+}
+
+.song-info-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.song-info-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+}
+
+.song-info-field > span {
+  color: var(--text-muted);
+}
+
+.song-info-field input,
+.song-info-field textarea {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(10, 12, 20, 0.4);
+  color: var(--text-strong);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 0.9rem;
+  outline: none;
+}
+
+.song-info-field textarea {
+  resize: vertical;
+}
+
+.song-info-field input:focus,
+.song-info-field textarea:focus {
+  border-color: rgba(183, 125, 255, 0.6);
+  box-shadow: 0 0 0 2px rgba(183, 125, 255, 0.2);
+}
+
+.song-info-field small {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.song-info-count {
+  align-self: flex-end;
+}
+
+.song-info-voices {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.song-info-voices a {
+  color: var(--accent-strong);
+}
+
+.song-info-error {
+  margin: 0;
+  color: #fca5a5;
+  font-size: 0.85rem;
+}
+
+.song-info-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-bottom: 8px;
+}
+
+@media (max-width: 600px) {
+  .song-info-panel {
+    width: 100%;
+  }
+}

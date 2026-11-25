@@ -960,6 +960,25 @@ body.legal-active #root {
   font-size: 12px;
 }
 
+/* The Song info button beside the Song title. */
+.song-info-button {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.song-info-button:hover {
+  color: var(--text-strong);
+  background: rgba(255, 255, 255, 0.08);
+}
+
 /* The score bar's zoom area: the Song's Download zip, when there is one, then the zoom. */
 .score-zoom-group {
   grid-area: zoom;

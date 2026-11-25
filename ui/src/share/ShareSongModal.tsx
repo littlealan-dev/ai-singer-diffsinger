@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
-import { ApiError, shareSong, unshareSong } from "../api";
+import { ApiError, fetchWorkspace, shareSong, SONG_LICENSES, type SongInfoFields, unshareSong } from "../api";
 import "./ShareSongModal.css";
 
 export type ShareState = { enabled: boolean; url: string | null };
@@ -10,8 +10,12 @@ interface ShareSongModalProps {
   title: string;
   /** The link, when the Song's sharing is already on: the box opens on it without a request. */
   url: string | null;
+  /** Info the open Song already has, while the dialog reads the current values. */
+  initialInfo?: SongInfoFields;
   onClose: () => void;
   onShareChange: (songId: string, share: ShareState) => void;
+  /** Opens the Song info panel; given only for the Song open on the page. */
+  onEditInfo?: () => void;
 }
 
 type View =
@@ -25,8 +29,14 @@ type View =
  * Share a Song: the one-time notice, then the link with Copy and Turn off.
  * Turning a link off ends it for good; sharing again makes a new one.
  */
-export default function ShareSongModal({ songId, title, url, onClose, onShareChange }: ShareSongModalProps) {
+export default function ShareSongModal({
+  songId, title, url, initialInfo, onClose, onShareChange, onEditInfo,
+}: ShareSongModalProps) {
   const [view, setView] = useState<View>(url ? { kind: "link", url, copied: false } : { kind: "loading" });
+  const [songInfo, setSongInfo] = useState<{ songId: string; info: SongInfoFields | null } | null>(null);
+  const linkReady = view.kind === "link" || view.kind === "confirm-off";
+  const fetchedInfo = songInfo?.songId === songId ? songInfo : null;
+  const info = fetchedInfo?.info ?? initialInfo;
   const onShareChangeRef = useRef(onShareChange);
   onShareChangeRef.current = onShareChange;
 
@@ -55,6 +65,21 @@ export default function ShareSongModal({ songId, title, url, onClose, onShareCha
     // Opened once per Song.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [songId]);
+
+  useEffect(() => {
+    if (!linkReady) return;
+    let cancelled = false;
+    void fetchWorkspace(songId)
+      .then(({ song }) => {
+        if (!cancelled) setSongInfo({ songId, info: song.info ?? null });
+      })
+      .catch(() => {
+        if (!cancelled) setSongInfo({ songId, info: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [linkReady, songId]);
 
   const copy = async (link: string) => {
     try {
@@ -134,6 +159,23 @@ export default function ShareSongModal({ songId, title, url, onClose, onShareCha
                 {view.kind === "link" && view.copied ? "Copied" : "Copy"}
               </button>
             </div>
+            <section className="share-modal-info" aria-label="Song info">
+              <div className="share-modal-info-header">
+                <h3>Song info</h3>
+                {onEditInfo && (
+                  <button type="button" className="btn-secondary-inline" onClick={onEditInfo}>
+                    Edit
+                  </button>
+                )}
+              </div>
+              {info ? (
+                <ReadOnlySongInfo info={info} />
+              ) : (
+                <p className="share-modal-text" role="status">
+                  {fetchedInfo ? "Song info is unavailable." : "Loading song info…"}
+                </p>
+              )}
+            </section>
             {view.kind === "confirm-off" ? (
               <div className="share-modal-confirm" role="alertdialog" aria-label="Turn off sharing?">
                 <p>Anyone with the link will see "This link was turned off". Sharing again makes a new link.</p>
@@ -171,5 +213,33 @@ export default function ShareSongModal({ songId, title, url, onClose, onShareCha
         )}
       </div>
     </div>
+  );
+}
+
+function ReadOnlySongInfo({ info }: { info: SongInfoFields }) {
+  const license = SONG_LICENSES[info.license] ?? SONG_LICENSES.all_rights_reserved;
+  const fields = [
+    ["Title", info.title],
+    ["Subtitle", info.subtitle],
+    ["Composer", info.composer],
+    ["Lyrics by", info.lyricist],
+    ["Arranger", info.arranger],
+    ["Credits", info.credits],
+    ["Score copyright", info.score_copyright],
+    ["Produced by", info.producer],
+    ["Voices", info.voices.join(", ") || "No sung parts yet"],
+    ["License", license.label],
+    ["Description", info.description],
+  ];
+
+  return (
+    <dl className="share-modal-info-list">
+      {fields.map(([label, value]) => (
+        <div key={label}>
+          <dt>{label}</dt>
+          <dd>{value || "—"}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }

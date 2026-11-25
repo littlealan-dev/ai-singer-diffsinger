@@ -16,7 +16,7 @@ import ffmpeg
 import numpy as np
 
 from src.api import voicebank_cache
-from src.backend import sing_all_store
+from src.backend import sing_all_store, songs
 from src.backend.audio_mix import _read_audio
 from src.backend.firebase_app import get_firestore_client
 from src.backend.sing_all_mix import (
@@ -27,6 +27,24 @@ from src.backend.storage_client import download_bytes, upload_file
 
 
 _package_tasks: set[asyncio.Task[None]] = set()
+
+
+def _song_info_lines(raw: Any, voices: list[str]) -> list[str]:
+    """The README's Song info: each filled field, the voices of this zip's takes, the license."""
+    info = songs.stored_song_info(raw)
+    license_name, license_url = songs.LICENSE_TEXT[info["license"]]
+    lines = [f"{label}: {info[key]}" for label, key in (
+        ("Subtitle", "subtitle"), ("Composer", "composer"), ("Lyrics by", "lyricist"),
+        ("Arranger", "arranger"), ("Credits", "credits"), ("Produced by", "producer"),
+    ) if info[key]]
+    if voices:
+        lines.append(f"Voices: {', '.join(voices)}")
+    lines.append(f"License: {license_name}" + (f" ({license_url})" if license_url else ""))
+    if info["scoreCopyright"]:
+        lines.append(f"Score copyright: {info['scoreCopyright']}")
+    if info["description"]:
+        lines.extend(["Description:", info["description"]])
+    return lines
 
 
 def _safe_name(value: Any, *, fallback: str = "Song") -> str:
@@ -282,6 +300,7 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
                           "3 Full mixes: all voices and instruments",
                           "4 Instrumentals: source MIDI", "5 Voicebank credits: voicebank authors",
                           f"Title: {job.get('title') or title}",
+                          *_song_info_lines(snapshot.get("song_info"), list(voices.values())),
                           f"Modes: {(job.get('choices') or {}).get('mode', '')}",
                           f"Verse: {(job.get('choices') or {}).get('verse', '')}",
                           "with repeats" if (job.get("choices") or {}).get("repeats") else "as written"]

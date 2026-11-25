@@ -10,7 +10,7 @@ import {
   register as registerExtendableMediaRecorderEncoder,
 } from "extendable-media-recorder";
 import { connect as connectExtendableWavEncoder } from "extendable-media-recorder-wav-encoder";
-import { Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Repeat, Square, Mic, Volume2, VolumeX, GripVertical, Sliders, ListMusic, FilePlus, Pencil, Share2 } from "lucide-react";
+import { Upload, Send, Sparkles, Minus, Plus, Download, Printer, ChevronsUpDown, ListCollapse, PanelLeftClose, PanelLeftOpen, Check, X, Music2, Play, Pause, Repeat, Square, Mic, Volume2, VolumeX, GripVertical, Sliders, ListMusic, FilePlus, Pencil, Share2, Info } from "lucide-react";
 import { createPortal } from "react-dom";
 import { Link, useLocation, useMatch, useNavigate } from "react-router-dom";
 import clsx from "clsx";
@@ -97,6 +97,7 @@ import { UserMenu } from "./components/UserMenu";
 import SongsDrawer from "./components/SongsDrawer";
 import NewSongOrReplaceModal from "./components/NewSongOrReplaceModal";
 import ShareSongModal, { type ShareState } from "./share/ShareSongModal";
+import SongInfoPanel from "./components/SongInfoPanel";
 import { logAnalyticsEvent } from "./firebase";
 import { useCredits } from "./hooks/useCredits";
 import { useBillingState } from "./hooks/useBillingState";
@@ -2053,6 +2054,7 @@ export default function MainApp() {
   // Share: the Song whose share box is open, and whether this user can share (from the last
   // workspace that said so; My songs offers Share only then).
   const [shareBoxSong, setShareBoxSong] = useState<{ id: string; title: string; url: string | null } | null>(null);
+  const [songInfoOpen, setSongInfoOpen] = useState(false);
   const [shareAvailable, setShareAvailable] = useState(false);
   const shareLookupSongRef = useRef<string | null>(null);
   // Sing All: the caller's running job, from any Song, and each job a card shows.
@@ -5283,7 +5285,12 @@ export default function MainApp() {
       const renamed = await renameSong(song.id, title);
       setCurrentSong((current) =>
         current && current.id === song.id
-          ? { ...current, title: renamed.title, title_edited: true }
+          ? {
+              ...current,
+              title: renamed.title,
+              title_edited: true,
+              info: current.info ? { ...current.info, title: renamed.title } : current.info,
+            }
           : current
       );
     } catch (err: any) {
@@ -5639,6 +5646,18 @@ export default function MainApp() {
                 <Pencil size={13} aria-hidden="true" />
               </button>
             )}
+            {currentSong.info && titleDraft === null ? (
+              <button
+                type="button"
+                className="song-info-button"
+                data-testid="song-info-open"
+                title="Song info"
+                aria-label="Song info"
+                onClick={() => setSongInfoOpen(true)}
+              >
+                <Info size={15} aria-hidden="true" />
+              </button>
+            ) : null}
           </div>
         ) : null}
         <div className="header-actions">
@@ -6848,8 +6867,36 @@ export default function MainApp() {
           songId={shareBoxSong.id}
           title={shareBoxSong.title}
           url={shareBoxSong.url}
+          initialInfo={shareBoxSong.id === currentSong?.id ? currentSong.info : undefined}
           onClose={() => setShareBoxSong(null)}
           onShareChange={handleShareChange}
+          onEditInfo={
+            currentSong?.info && shareBoxSong.id === currentSong.id
+              ? () => {
+                  setShareBoxSong(null);
+                  setSongInfoOpen(true);
+                }
+              : undefined
+          }
+        />
+      ) : null}
+      {songInfoOpen && currentSong?.info ? (
+        <SongInfoPanel
+          songId={currentSong.id}
+          info={currentSong.info}
+          onClose={() => setSongInfoOpen(false)}
+          onSaved={(row) =>
+            setCurrentSong((current) =>
+              current && current.id === row.id
+                ? {
+                    ...current,
+                    title: row.title,
+                    title_edited: current.title_edited || row.title !== current.title,
+                    info: row.info ?? current.info,
+                  }
+                : current
+            )
+          }
         />
       ) : null}
       {pendingUpload && !pendingUpload.waitForWorkToEnd ? (

@@ -37,6 +37,13 @@ type Song = {
   currentJobId: string | null;
   history: Turn[];
   player: { scoreId: string | null; revision: number; vocals: Vocal[]; instruments: unknown[]; bus: unknown };
+  info: Record<string, string>;
+};
+
+// A Song's info as the backend fills it at the first upload (made-up credits).
+const UPLOADED_INFO = {
+  subtitle: "", composer: "Made-up Composer", lyricist: "", arranger: "", credits: "", score_copyright: "",
+  producer: "Pat Producer", description: "", license: "all_rights_reserved",
 };
 
 function silentWav(seconds: number): Buffer {
@@ -101,6 +108,7 @@ type Backend = {
   reply: (next: Reply) => void;
   releaseReply: () => void;
   finishJob: (jobId: string) => void;
+  songPatches: () => Array<Record<string, unknown>>;
   setStopResult: (result: "stopped" | "too_late") => void;
   stopRequests: () => number;
   sessionsCreated: () => number;
@@ -113,6 +121,7 @@ async function mockBackend(page: Page, { instruments = false } = {}): Promise<Ba
   const jobs = new Map<string, Job>();
   const songs = new Map<string, Song>();
   const uploads: string[] = [];
+  const songPatches: Array<Record<string, unknown>> = [];
   let sessionsCreated = 0;
   let stopRequests = 0;
   let stopResult: "stopped" | "too_late" = "stopped";
@@ -191,9 +200,15 @@ async function mockBackend(page: Page, { instruments = false } = {}): Promise<Ba
     status: song.currentJobId && jobs.get(song.currentJobId)?.status === "running" ? "working" : "idle",
     track_count: song.player.scoreId === song.scoreId ? song.player.vocals.length : 0,
   });
+  const songInfo = (song: Song) => ({
+    ...song.info, title: song.title, voices: song.player.vocals.length ? ["Voice A"] : [],
+  });
   const workspace = (song: Song) => ({
     session_id: song.id,
-    song: { id: song.id, title: song.title, title_edited: song.titleEdited, created_at: song.createdAt },
+    song: {
+      id: song.id, title: song.title, title_edited: song.titleEdited, created_at: song.createdAt,
+      info: songInfo(song),
+    },
     score: {
       score_id: song.scoreId,
       current_score: { version: 1 },
@@ -246,6 +261,7 @@ async function mockBackend(page: Page, { instruments = false } = {}): Promise<Ba
       const id = `song-${sessionsCreated}`;
       songs.set(id, {
         id, isSong: false, deleted: false, title: "", titleEdited: false, createdAt: "", lastActive: clock,
+        info: { ...UPLOADED_INFO },
         scoreId: null, currentJobId: null, history: [],
         player: { scoreId: null, revision: 0, vocals: [], instruments: [], bus: emptyBus },
       });
@@ -281,9 +297,14 @@ async function mockBackend(page: Page, { instruments = false } = {}): Promise<Ba
         return json({ revision: song.player.revision });
       }
       if (request.method() === "PATCH") {
-        song.title = String(request.postDataJSON().title).trim();
-        song.titleEdited = true;
-        return json(songRow(song));
+        const body = request.postDataJSON();
+        songPatches.push(body);
+        if (body.title !== undefined) {
+          song.title = String(body.title).trim();
+          song.titleEdited = true;
+        }
+        Object.assign(song.info, body.info ?? {});
+        return json({ ...songRow(song), info: songInfo(song) });
       }
       if (request.method() === "DELETE") {
         if (running(song.id).length) return json({ code: "work_running", message: "Still working." }, 409);
@@ -396,6 +417,7 @@ async function mockBackend(page: Page, { instruments = false } = {}): Promise<Ba
     stopRequests: () => stopRequests,
     sessionsCreated: () => sessionsCreated,
     uploads: () => [...uploads],
+    songPatches: () => [...songPatches],
   };
 }
 
@@ -788,4 +810,38 @@ test("Replace waits when the running job is too late to stop", async ({ page }) 
   await choicePopup(page).getByRole("button", { name: /^Replace/ }).click();
   await expect(songTitle(page)).toHaveText("second-tune");
   await expect(vocalRows(page)).toHaveCount(0);
+});
+
+test("Song info opens from the title, saves only what changed, and comes back after a reload", async ({ page }) => {
+  const backend = await openStudio(page, "songs-info");
+  await startSong(page, "first-tune.xml");
+  await page.getByTestId("song-info-open").click();
+  const panel = page.getByTestId("song-info-panel");
+  await expect(panel.getByLabel("Composer")).toHaveValue("Made-up Composer");
+  await expect(panel.getByLabel("Produced by")).toHaveValue("Pat Producer");
+  await expect(panel.getByLabel("Title", { exact: true })).toHaveValue("first-tune");
+  await expect(panel.getByTestId("song-info-voices")).toContainText("No sung parts yet");
+
+  await panel.getByLabel("Lyrics by").fill("Cat Example");
+  await panel.getByLabel("License").selectOption("cc_by_4");
+  await panel.getByLabel("Description").fill("Made-up notes.\nSecond line.");
+  await panel.getByLabel("Title", { exact: true }).fill("Renamed Tune");
+  await panel.getByRole("button", { name: "Save" }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(songTitle(page)).toHaveText("Renamed Tune");
+  expect(backend.songPatches().at(-1)).toEqual({
+    title: "Renamed Tune",
+    info: { lyricist: "Cat Example", license: "cc_by_4", description: "Made-up notes.\nSecond line." },
+  });
+
+  await page.reload();
+  await page.getByTestId("song-info-open").click();
+  await expect(panel.getByLabel("Lyrics by")).toHaveValue("Cat Example");
+  await expect(panel.getByLabel("License")).toHaveValue("cc_by_4");
+  await expect(panel.getByLabel("Description")).toHaveValue("Made-up notes.\nSecond line.");
+  // Nothing changed: Cancel and Save send nothing.
+  const patches = backend.songPatches().length;
+  await panel.getByRole("button", { name: "Save" }).click();
+  await expect(panel).toHaveCount(0);
+  expect(backend.songPatches()).toHaveLength(patches);
 });

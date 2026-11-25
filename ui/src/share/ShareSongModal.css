@@ -17,6 +17,8 @@
     border-radius: 24px;
     width: 100%;
     max-width: 480px;
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
     box-shadow: 0 32px 80px rgba(0, 0, 0, 0.7),
                 inset 0 0 0 1px var(--glass-border);
 }
@@ -83,4 +85,45 @@
 .share-modal-confirm p {
     margin: 1rem 0 0;
     font-size: 0.9rem;
+}
+
+.share-modal-info {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--glass-border);
+  font-size: 0.85rem;
+}
+
+.share-modal-info-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.share-modal-info-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.share-modal-info-list {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.6rem 0 0;
+}
+
+.share-modal-info-list > div {
+  display: grid;
+  grid-template-columns: min(36%, 7.5rem) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.share-modal-info-list dt {
+  color: var(--text-muted);
+}
+
+.share-modal-info-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }

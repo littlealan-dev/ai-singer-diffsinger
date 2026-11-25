@@ -63,6 +63,16 @@
   gap: 12px;
 }
 
+.share-song-heading {
+  min-width: 0;
+}
+
+.share-song-subtitle {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
 .share-song-title {
   margin: 0;
   font-size: 1.4rem;
@@ -266,6 +276,51 @@
 .share-song-empty {
   color: var(--text-muted);
   font-size: 0.9rem;
+}
+
+/* Song info under Parts: label and value side by side, the description below. */
+.share-song-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.share-song-info-body[hidden] {
+  display: none;
+}
+
+.share-song-info-list {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 0.85rem;
+}
+
+.share-song-info-list > div {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+  gap: 8px;
+}
+
+.share-song-info-list dt {
+  color: var(--text-muted);
+}
+
+.share-song-info-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.share-song-info-list a,
+.share-song-description a {
+  color: var(--accent-strong);
+}
+
+.share-song-description {
+  margin: 8px 0 0;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .share-song-credits {

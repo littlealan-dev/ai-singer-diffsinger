@@ -48,16 +48,119 @@ def normalize_song_title(raw: Any) -> Optional[str]:
     return title
 
 
-def song_fields_at_upload(session: Dict[str, Any], summary: Any, file_name: Optional[str], now: Any) -> Dict[str, Any]:
-    """Session updates for an upload: a first upload makes the session a Song."""
+def song_fields_at_upload(
+    session: Dict[str, Any], summary: Any, file_name: Optional[str], now: Any, *,
+    score_info: Optional[Dict[str, str]] = None, producer: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Session updates for an upload: a first upload makes the session a Song.
+
+    Song info is filled from the score at the first upload, with the producer's name.
+    A later upload refills only the score's fields the owner hasn't edited.
+    """
+    from_score = {key: str((score_info or {}).get(key) or "")[:SONG_INFO_LIMITS[key]]
+                  for key in SCORE_INFO_FIELDS}
     if not session.get("songCreatedAt"):
         return {
             "songCreatedAt": now, "songListed": True, "deletedAt": None,
             "titleEdited": False, "title": song_title_from(summary, file_name),
+            "songInfo": {
+                **from_score,
+                "producer": str(producer or "").strip()[:SONG_INFO_LIMITS["producer"]],
+                "description": "", "license": DEFAULT_LICENSE, "edited": [],
+            },
         }
+    fields: Dict[str, Any] = {}
     if not session.get("titleEdited"):
-        return {"title": song_title_from(summary, file_name)}
-    return {}
+        fields["title"] = song_title_from(summary, file_name)
+    info = dict(session.get("songInfo") or {})
+    edited = set(info.get("edited") or [])
+    info.update({key: value for key, value in from_score.items() if key not in edited})
+    fields["songInfo"] = stored_song_info(info)
+    return fields
+
+
+# Song info (docs/specs/song-info-spec.md). Stored camelCase on the session as songInfo.
+SCORE_INFO_FIELDS = ("subtitle", "composer", "lyricist", "arranger", "credits", "scoreCopyright")
+SONG_INFO_LIMITS = {
+    "subtitle": 200, "composer": 200, "lyricist": 200, "arranger": 200, "credits": 500,
+    "scoreCopyright": 300, "producer": 120, "description": 2000,
+}
+SONG_LICENSES = ("all_rights_reserved", "cc_by_4", "public_domain")
+DEFAULT_LICENSE = "all_rights_reserved"
+LICENSE_TEXT = {
+    "all_rights_reserved": ("All rights reserved", None),
+    "cc_by_4": ("CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/"),
+    "public_domain": ("Public domain (CC0)", "https://creativecommons.org/publicdomain/zero/1.0/"),
+}
+_INFO_API_KEYS = {
+    "subtitle": "subtitle", "composer": "composer", "lyricist": "lyricist",
+    "arranger": "arranger", "credits": "credits", "score_copyright": "scoreCopyright",
+    "producer": "producer",
+    "description": "description", "license": "license",
+}
+
+
+class InvalidSongInfo(ValueError):
+    """A Song info edit the API refuses; its argument is the offending key."""
+
+
+def stored_song_info(raw: Any) -> Dict[str, Any]:
+    """A session's songInfo with every field present: empty text and the default license."""
+    info = raw if isinstance(raw, dict) else {}
+    stored: Dict[str, Any] = {key: str(info.get(key) or "") for key in SONG_INFO_LIMITS}
+    stored["license"] = info.get("license") if info.get("license") in SONG_LICENSES else DEFAULT_LICENSE
+    stored["edited"] = sorted({key for key in info.get("edited") or [] if key in _INFO_API_KEYS.values()})
+    return stored
+
+
+def normalize_song_info_edit(raw: Any) -> Dict[str, str]:
+    """The owner's edits, keyed as stored, or InvalidSongInfo naming the first bad key."""
+    if not isinstance(raw, dict):
+        raise InvalidSongInfo("info")
+    edits: Dict[str, str] = {}
+    for key, value in raw.items():
+        stored_key = _INFO_API_KEYS.get(key)
+        if stored_key is None or not isinstance(value, str):
+            raise InvalidSongInfo(str(key))
+        if stored_key == "license":
+            if value not in SONG_LICENSES:
+                raise InvalidSongInfo(key)
+            edits[stored_key] = value
+            continue
+        text = value.replace("\r\n", "\n").strip()
+        if stored_key != "description":
+            text = " ".join(text.split())
+        if len(text) > SONG_INFO_LIMITS[stored_key]:
+            raise InvalidSongInfo(key)
+        edits[stored_key] = text
+    return edits
+
+
+def song_info_with_edits(raw: Any, edits: Dict[str, str]) -> Dict[str, Any]:
+    """songInfo after the owner's edits, each edited key remembered so an upload keeps it."""
+    info = stored_song_info(raw)
+    info.update(edits)
+    info["edited"] = sorted(set(info["edited"]) | set(edits))
+    return info
+
+
+def voice_names(tracks: Iterable[Dict[str, Any]]) -> List[str]:
+    """The voicebank names of these sung tracks, each once, in track order."""
+    names: List[str] = []
+    for track in tracks:
+        name = track.get("voiceName")
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+    return names
+
+
+def song_info_response(raw: Any, *, title: Optional[str], voices: List[str]) -> Dict[str, Any]:
+    """The API's Song info: snake_case, with the title and the voices."""
+    info = stored_song_info(raw)
+    response: Dict[str, Any] = {"title": title or UNTITLED_SONG}
+    response.update({api_key: info[stored_key] for api_key, stored_key in _INFO_API_KEYS.items()})
+    response["voices"] = list(voices)
+    return response
 
 
 def empty_player(owner_uid: Optional[str], score_id: Optional[str]) -> Dict[str, Any]:

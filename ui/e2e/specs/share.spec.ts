@@ -97,6 +97,13 @@ async function createBackend(): Promise<Backend> {
     performance_midi: state.instruments ? PERFORMANCE_MIDI : null,
   });
   const shareUrl = (page: Page) => `${new URL(page.url()).origin}/s/${token}`;
+  // Made-up credits; Arranger and Score copyright left empty, so the page leaves them out.
+  const songInfo = () => ({
+    title: TITLE, subtitle: "For made-up voices", composer: "Made-up Composer", lyricist: "",
+    arranger: "", credits: "Arranged by Made-up Name", score_copyright: "", producer: "Pat Producer",
+    license: "cc_by_4",
+    description: "Made-up notes.\nSecond line.", voices: state.vocals.length ? ["Voice A"] : [],
+  });
   const publicPage = () => ({
     title: TITLE,
     is_owner: false,
@@ -118,6 +125,7 @@ async function createBackend(): Promise<Backend> {
       midi_url: state.instruments ? `/public/s/${token}/midi?expand_repeats=false` : null,
     },
     credits: { voices: state.vocals.length ? ["Voice A"] : [] },
+    info: songInfo(),
   });
 
   backend.attach = async (page: Page) => {
@@ -169,6 +177,7 @@ async function createBackend(): Promise<Backend> {
           song: {
             id: SONG, title: TITLE, title_edited: false, created_at: "2026-01-01T00:00:00Z",
             share: { available: state.available, enabled: Boolean(token), url: token ? shareUrl(page) : null },
+            info: songInfo(),
           },
           score: {
             score_id: "score-1", current_score: { version: 1 }, score_summary: summary(),
@@ -389,6 +398,9 @@ test("My songs marks a shared Song, and its Share action turns the link off ther
   await expect(songRow.getByText("Shared", { exact: true })).toBeVisible();
   await songRow.getByRole("button", { name: "Share" }).click();
   await expect(shareBox(page).getByRole("textbox", { name: "Share link" })).toHaveValue(/\/s\/tok/);
+  const info = shareBox(page).getByRole("region", { name: "Song info" });
+  await expect(info).toContainText("Made-up Composer");
+  await expect(info.getByRole("button", { name: "Edit" })).toHaveCount(0);
   await shareBox(page).getByRole("button", { name: "Turn off sharing" }).click();
   await shareBox(page).getByRole("button", { name: "Turn off" }).click();
   await expect(shareBox(page)).toHaveCount(0);
@@ -412,7 +424,17 @@ test("the page, signed out: title, score, one row per sung part, and Play plays"
   await expect(viewer.locator('meta[name="robots"]')).toHaveAttribute("content", "noindex, nofollow");
   await expect(viewer.locator(".share-song-score svg").first()).toBeVisible();
   await expect(viewer.getByTestId(/^share-row-/)).toHaveCount(2);
-  await expect(viewer.getByText("Voices: Voice A")).toBeVisible();
+  // Song info under Parts carries the voices; the old Voices line under Parts is gone.
+  const info = viewer.locator(".share-song-info");
+  await expect(info).toContainText("ComposerMade-up Composer");
+  await expect(info).toContainText("VoicesVoice A");
+  await expect(info.getByRole("link", { name: "CC BY 4.0" })).toHaveAttribute(
+    "href", "https://creativecommons.org/licenses/by/4.0/");
+  await expect(info).toContainText("CreditsArranged by Made-up Name");
+  await expect(info).not.toContainText("Arranger");
+  await expect(info.locator(".share-song-description")).toHaveText("Made-up notes.\nSecond line.");
+  await expect(viewer.locator(".share-song-subtitle")).toHaveText("For made-up voices");
+  await expect(viewer.locator(".share-song-credits")).toHaveCount(0);
   await expect(viewer.getByRole("link", { name: "Sign in" })).toHaveAttribute("href", "/app");
   await expect(viewer.getByRole("link", { name: "Open in SightSinger" })).toHaveCount(0);
 
@@ -430,6 +452,29 @@ test("the page, signed out: title, score, one row per sung part, and Play plays"
   expect(backend.soundfontRequests()).toBe(0);
   expect(backend.privateRequests).toEqual([]);
   await viewer.context().close();
+});
+
+test("the Share dialog shows read-only Song info and Edit opens the panel", async ({ page }) => {
+  const backend = await createBackend();
+  backend.state.noticeAccepted = true;
+  backend.state.vocals.push({ key: "P1:lyrics", label: "Soprano", mode: "lyrics" });
+  await openSongAsOwner(page, backend, "share-info-edit");
+  await shareFromTheApp(page);
+  const info = shareBox(page).getByRole("region", { name: "Song info" });
+  await expect(info.getByRole("term")).toHaveText([
+    "Title", "Subtitle", "Composer", "Lyrics by", "Arranger", "Credits", "Score copyright",
+    "Produced by", "Voices", "License", "Description",
+  ]);
+  await expect(info.getByRole("definition")).toHaveText([
+    TITLE, "For made-up voices", "Made-up Composer", "—", "—", "Arranged by Made-up Name", "—",
+    "Pat Producer", "Voice A", "CC BY 4.0", "Made-up notes.\nSecond line.",
+  ]);
+  await expect(shareBox(page).getByRole("textbox")).toHaveCount(1);
+  await info.getByRole("button", { name: "Edit" }).click();
+  await expect(shareBox(page)).toHaveCount(0);
+  const panel = page.getByTestId("song-info-panel");
+  await expect(panel.getByLabel("Composer")).toHaveValue("Made-up Composer");
+  await expect(panel.getByLabel("License")).toHaveValue("cc_by_4");
 });
 
 test("the score opens in page view, switches to horizontal, and the page fits a phone", async ({ page, browser }) => {

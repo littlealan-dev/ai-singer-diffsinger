@@ -99,6 +99,35 @@ export type SongInfo = {
   last_active_at?: string;
   /** Present on a workspace's Song: whether this user can share, and the link while it is on. */
   share?: SongShare;
+  /** Present on a workspace's Song: its credits, license and description. */
+  info?: SongInfoFields;
+};
+
+export type SongLicense = "all_rights_reserved" | "cc_by_4" | "public_domain";
+
+/** A Song's info (docs/specs/song-info-spec.md). Voices are read-only: the sung tracks' voicebanks. */
+export type SongInfoFields = {
+  title: string;
+  subtitle: string;
+  composer: string;
+  lyricist: string;
+  arranger: string;
+  /** The score's printed credit boxes, as printed. Absent from a backend before it. */
+  credits?: string;
+  score_copyright: string;
+  producer: string;
+  description: string;
+  license: SongLicense;
+  voices: string[];
+};
+
+/** The fields the owner can edit, besides the title. */
+export type SongInfoEdit = Partial<Omit<SongInfoFields, "title" | "voices">>;
+
+export const SONG_LICENSES: Record<SongLicense, { label: string; url: string | null }> = {
+  all_rights_reserved: { label: "All rights reserved", url: null },
+  cc_by_4: { label: "CC BY 4.0", url: "https://creativecommons.org/licenses/by/4.0/" },
+  public_domain: { label: "Public domain (CC0)", url: "https://creativecommons.org/publicdomain/zero/1.0/" },
 };
 
 export type SongShare = {
@@ -117,6 +146,8 @@ export type SongRow = {
   track_count: number;
   /** True while the Song's share link is on. */
   shared?: boolean;
+  /** On the answer to a Song update. */
+  info?: SongInfoFields;
 };
 
 export type WorkspaceMessage = {
@@ -229,6 +260,8 @@ export type SharePageData = {
   score: { version: number | null; url: string; summary: ShareSummary };
   player: SharePlayer;
   credits: { voices: string[] };
+  /** Absent from a backend before Song Info. */
+  info?: SongInfoFields;
 };
 
 export type PlayerMixRequest = {
@@ -1008,6 +1041,18 @@ export async function renameSong(songId: string, title: string): Promise<SongRow
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
+  });
+}
+
+/** Rename the Song and edit its info in one request. */
+export async function updateSongInfo(
+  songId: string,
+  changes: { title?: string; info?: SongInfoEdit }
+): Promise<SongRow> {
+  return request<SongRow>(`/songs/${songId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(changes),
   });
 }
 

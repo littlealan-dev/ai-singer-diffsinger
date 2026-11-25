@@ -83,6 +83,7 @@ class SessionState:
     # A session becomes a Song at its first score upload.
     title: Optional[str] = None
     title_edited: bool = False
+    song_info: Optional[Dict[str, Any]] = None
     song_created_at: Optional[datetime] = None
     song_listed: bool = False
     deleted_at: Optional[datetime] = None
@@ -128,6 +129,7 @@ class SessionState:
             "solfege_settings": dict(self.solfege_settings),
             "current_audio": dict(self.current_audio) if self.current_audio else None,
             "song": self.song(),
+            "song_info": songs.stored_song_info(self.song_info),
         }
 
     def _score_snapshot(self) -> Optional[Dict[str, Any]]:
@@ -172,13 +174,14 @@ class WorkspacePersistence:
         return storage_path
 
     async def commit_uploaded_score(self, session_id, *, score_id, score, summary, files,
-                                    file_name=None):
+                                    file_name=None, score_info=None, producer=None):
         snapshot = await self.get_snapshot(session_id, None)
         path = await asyncio.to_thread(
             self._stage_score, session_id, snapshot["user_id"], score_id, 1, score
         )
         def commit(data):
-            song = songs.song_fields_at_upload(data, summary, file_name, self._now_value())
+            song = songs.song_fields_at_upload(data, summary, file_name, self._now_value(),
+                                               score_info=score_info, producer=producer)
             player = songs.empty_player(snapshot["user_id"], score_id)
             return {
                 **song,
@@ -246,7 +249,8 @@ _WORKSPACE_FIELDS = {
     "files": "files", "currentAudio": "current_audio", "scoreContextUpdated": "score_context_updated",
     "preprocessPlanHistory": "preprocess_plan_history", "preprocessAttemptHistory": "preprocess_attempt_history",
     "lastPreprocessPlan": "last_preprocess_plan", "solfegeSettings": "solfege_settings",
-    "title": "title", "titleEdited": "title_edited", "songCreatedAt": "song_created_at",
+    "title": "title", "titleEdited": "title_edited", "songInfo": "song_info",
+    "songCreatedAt": "song_created_at",
     "songListed": "song_listed", "deletedAt": "deleted_at",
 }
 
@@ -570,6 +574,7 @@ class SessionStore(WorkspacePersistence):
     def _state_song_fields(state: SessionState) -> Dict[str, Any]:
         return {
             "title": state.title, "songCreatedAt": state.song_created_at,
+            "songInfo": state.song_info,
             "lastActiveAt": state.last_active_at, "currentJobId": state.current_job_id,
             "scoreId": state.score_id,
             "shareToken": state.share_token,
@@ -622,11 +627,19 @@ class SessionStore(WorkspacePersistence):
                 state.player = self._stamped_player(player)
 
     async def rename_song(self, session_id: str, user_id: str, title: str) -> Dict[str, Any]:
+        return await self.update_song(session_id, user_id, title=title)
+
+    async def update_song(self, session_id: str, user_id: str, *, title: Optional[str] = None,
+                          info: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """Rename the Song and edit its info, in one change. Answers the Song row with its info."""
         async with self._lock:
             state = self._song_locked(session_id, user_id)
-            state.title = title
-            state.title_edited = True
-            return _song_row(session_id, self._state_song_fields(state), state.player)
+            if title is not None:
+                state.title = title
+                state.title_edited = True
+            if info:
+                state.song_info = songs.song_info_with_edits(state.song_info, info)
+            return _song_row_with_info(session_id, self._state_song_fields(state), state.player)
 
     async def delete_song(self, session_id: str, user_id: str) -> None:
         """Take the Song off the list. Its files, jobs and billing records stay."""
@@ -844,6 +857,7 @@ class FirestoreSessionStore(WorkspacePersistence):
             job_history_schema_version=int(data.get("jobHistorySchemaVersion") or 1),
             title=data.get("title"),
             title_edited=bool(data.get("titleEdited", False)),
+            song_info=data.get("songInfo") if isinstance(data.get("songInfo"), dict) else None,
             song_created_at=(
                 data.get("songCreatedAt") if isinstance(data.get("songCreatedAt"), datetime) else None
             ),
@@ -885,7 +899,7 @@ class FirestoreSessionStore(WorkspacePersistence):
     async def read_shared(self, session_id: str) -> SessionState:
         """Read only public Song fields, with no activity write."""
         fields = ["userId", "createdAt", "lastActiveAt", "deletedAt", "songCreatedAt",
-                  "title", "scoreId", "scoreSummary", "files", "currentScore",
+                  "title", "songInfo", "scoreId", "scoreSummary", "files", "currentScore",
                   "currentScorePath", "currentScoreVersion", "shareToken"]
         def run() -> SessionState:
             data = self._read_owned(session_id, None, touch=False, field_paths=fields)
@@ -1264,6 +1278,11 @@ class FirestoreSessionStore(WorkspacePersistence):
         return await self._run_session_io(session_id, run)
 
     async def rename_song(self, session_id: str, user_id: str, title: str) -> Dict[str, Any]:
+        return await self.update_song(session_id, user_id, title=title)
+
+    async def update_song(self, session_id: str, user_id: str, *, title: Optional[str] = None,
+                          info: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """Rename the Song and edit its info, in one transaction. Answers the Song row with its info."""
         def run() -> Dict[str, Any]:
             session_ref, player_ref = self._doc_ref(session_id), self._player_ref(session_id)
 
@@ -1271,9 +1290,15 @@ class FirestoreSessionStore(WorkspacePersistence):
             def commit(txn) -> Dict[str, Any]:
                 data = self._owned_song(session_ref.get(transaction=txn), session_id, user_id)
                 player = player_ref.get(transaction=txn)
-                txn.update(session_ref, {"title": title, "titleEdited": True})
-                return _song_row(
-                    session_id, {**data, "title": title},
+                changes: Dict[str, Any] = {}
+                if title is not None:
+                    changes.update(title=title, titleEdited=True)
+                if info:
+                    changes["songInfo"] = songs.song_info_with_edits(data.get("songInfo"), info)
+                if changes:
+                    txn.update(session_ref, changes)
+                return _song_row_with_info(
+                    session_id, {**data, **changes},
                     (player.to_dict() or {}) if player.exists else None,
                 )
 
@@ -1380,6 +1405,16 @@ def _song_row(session_id: str, data: Dict[str, Any], player: Optional[Dict[str, 
         "track_count": len(tracks) if holds_this_score else 0,
         "shared": bool(data.get("shareToken")),
     }
+
+
+def _song_row_with_info(session_id: str, data: Dict[str, Any], player: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """A Song row with its info, the voices from the player's tracks for the current score."""
+    tracks = (player or {}).get("vocals") or []
+    holds_this_score = bool(player) and player.get("scoreId") == data.get("scoreId")
+    return {**_song_row(session_id, data, player), "info": songs.song_info_response(
+        data.get("songInfo"), title=data.get("title"),
+        voices=songs.voice_names(tracks) if holds_this_score else [],
+    )}
 
 
 def _serialize_score(score: Dict[str, Any]) -> bytes:

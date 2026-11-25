@@ -122,6 +122,7 @@ from src.musicxml.io import (
     read_musicxml_content as read_musicxml_content_bounded,
 )
 from src.musicxml.measure_numbers import renumber_unnumbered_measures
+from src.musicxml.score_info import score_info_from_musicxml
 from src.mcp.logging_utils import (
     clear_log_context,
     configure_logging,
@@ -956,12 +957,13 @@ def create_app() -> FastAPI:
             if not data.get("parentJobId")
         ]
         player_payload = songs.player_response(player, score_id=state.score_id)
-        tracks = songs.usable_vocals(
+        # A list, not the generator: the tracks are read twice, for the player and the voices.
+        tracks = list(songs.usable_vocals(
             player,
             score_id=state.score_id,
             score_summary=state.score_summary,
             jobs_by_id=dict(session_jobs),
-        )
+        ))
         for track, job in tracks:
             job_id = str(track.get("sourceJobId"))
             # The same signing, and the same audio path check, as the job's own progress.
@@ -973,6 +975,10 @@ def create_app() -> FastAPI:
                 "audio_url": signed["audio_url"],
                 "progress_url": _job_progress_url(session_id, job_id),
             })
+        song["info"] = songs.song_info_response(
+            state.song_info, title=state.title,
+            voices=songs.voice_names(track for track, _ in tracks),
+        )
         return {
             "session_id": session_id,
             "song": song,
@@ -1065,6 +1071,7 @@ def create_app() -> FastAPI:
         is_owner = bool(viewer and viewer[0] == share["ownerUid"])
         return {
             "title": state.title or songs.UNTITLED_SONG,
+            "info": songs.song_info_response(state.song_info, title=state.title, voices=voices),
             "is_owner": is_owner,
             "song_id": state.id if is_owner else None,
             "score": {
@@ -1140,15 +1147,30 @@ def create_app() -> FastAPI:
         return FileResponse(path, media_type=_audio_media_type(str(path)))
 
     @app.patch("/songs/{session_id}")
-    async def rename_song(session_id: str, request: Request) -> Any:
+    async def update_song(session_id: str, request: Request) -> Any:
+        """Rename the Song and edit its info: a body with `title`, `info`, or both."""
         sessions: SessionStore = request.app.state.sessions
         user_id = await _get_user_id_or_401(request)
         body = await _json_body_or_none(request)
-        title = songs.normalize_song_title(body.get("title") if isinstance(body, dict) else None)
-        if title is None:
+        body = body if isinstance(body, dict) else {}
+        if "title" not in body and "info" not in body:
             return _song_error(400, "invalid_title", "song.invalid_title")
+        title = None
+        if "title" in body:
+            title = songs.normalize_song_title(body.get("title"))
+            if title is None:
+                return _song_error(400, "invalid_title", "song.invalid_title")
+        info: Dict[str, str] = {}
+        if "info" in body:
+            try:
+                info = songs.normalize_song_info_edit(body.get("info"))
+            except songs.InvalidSongInfo as exc:
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_song_info", "field": str(exc),
+                    "message": backend_message("song.invalid_song_info"),
+                })
         try:
-            row = await sessions.rename_song(session_id, user_id, title)
+            row = await sessions.update_song(session_id, user_id, title=title, info=info)
         except (KeyError, PermissionError):
             return _song_error(404, "song_not_found", "song.not_found")
         return (await _with_song_status(request.app.state.job_store, [row]))[0]
@@ -1412,10 +1434,12 @@ def create_app() -> FastAPI:
         if isinstance(score, dict):
             score = dict(score)
             score.pop("score_summary", None)
+        score_info = await asyncio.to_thread(score_info_from_musicxml, canonical_musicxml_path)
         try:
             version = await sessions.commit_uploaded_score(
                 session_id, score_id=score_id, score=score, summary=score_summary, files=files,
-                file_name=original_name,
+                file_name=original_name, score_info=score_info,
+                producer=getattr(request.state, "user_display_name", ""),
             )
         except InvalidArgument as exc:
             # Firestore rejected the parsed score. Its error does not say which
@@ -3553,6 +3577,8 @@ async def _get_verified_user_context_or_401(request: Request) -> tuple[str, str]
         claims = await asyncio.to_thread(verify_id_token_claims, token)
         user_id = str(claims["uid"])
         user_email = str(claims.get("email") or "")
+        # The account's display name, for a new Song's "Produced by"; never the email.
+        request.state.user_display_name = str(claims.get("name") or "").strip()
         set_log_context(user_id=user_id)
         return user_id, user_email
     except HTTPException:
