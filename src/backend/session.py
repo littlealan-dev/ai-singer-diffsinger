@@ -368,6 +368,16 @@ class SessionStore(WorkspacePersistence):
         async with self._lock:
             return copy.deepcopy(self._shares.get(token))
 
+    async def count_share_use(self, token: str, *, play: bool = False) -> None:
+        async with self._lock:
+            record = self._shares.get(token)
+            if record is None:
+                return
+            field = "plays" if play else "views"
+            record[field] = record.get(field, 0) + 1
+            if not play:
+                record["lastViewedAt"] = _utcnow()
+
     async def share_on(self, session_id: str, user_id: str) -> str:
         async with self._lock:
             state = self._song_locked(session_id, user_id)
@@ -924,6 +934,14 @@ class FirestoreSessionStore(WorkspacePersistence):
             doc = self._client.collection("shares").document(token).get()
             return (doc.to_dict() or {}) if doc.exists else None
         return await asyncio.to_thread(run)
+
+    async def count_share_use(self, token: str, *, play: bool = False) -> None:
+        fields = {"plays": firestore.Increment(1)} if play else {
+            "views": firestore.Increment(1), "lastViewedAt": firestore.SERVER_TIMESTAMP,
+        }
+        await asyncio.to_thread(
+            self._client.collection("shares").document(token).update, fields,
+        )
 
     async def share_on(self, session_id: str, user_id: str) -> str:
         def run() -> str:

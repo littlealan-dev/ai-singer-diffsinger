@@ -82,7 +82,7 @@ from src.backend.sing_all_prompts import quote_prompt, style_prompt
 from src.backend.language_selection import normalize_language_code
 from src.backend.sing_all_store import (
     active_job_for_song, answer_decision as answer_sing_all_decision_record,
-    apply as apply_sing_all_job, create_job_with_reservations,
+    apply as apply_sing_all_job, count_zip_download, create_job_with_reservations,
     latest_judgment, running_jobs as running_sing_all_jobs,
     load as load_sing_all_job,
     read_judgment, read_quote, read_style,
@@ -1045,6 +1045,12 @@ def create_app() -> FastAPI:
             return _song_error(404, "song_not_found", "song.not_found")
         return {"enabled": False, "url": None}
 
+    async def count_share_use(token: str, *, play: bool = False) -> None:
+        try:
+            await sessions.count_share_use(token, play=play)
+        except Exception:
+            logger.warning("Could not update Share %s counter.", "play" if play else "view")
+
     @app.get("/public/s/{token}")
     async def public_share_page(token: str, request: Request) -> Any:
         resolved = await resolve_share(token, request, "page")
@@ -1091,6 +1097,8 @@ def create_app() -> FastAPI:
         }
         viewer = await _get_optional_verified_user_context(request)
         is_owner = bool(viewer and viewer[0] == share["ownerUid"])
+        if not is_owner:
+            await count_share_use(token)
         return {
             "title": state.title or songs.UNTITLED_SONG,
             "info": songs.song_info_response(state.song_info, title=state.title, voices=voices),
@@ -1134,8 +1142,25 @@ def create_app() -> FastAPI:
             state.user_id, state.snapshot(), expand_repeats, touch=False,
         )
 
+    class SharePlayFileResponse(FileResponse):
+        """Count the actual response since FileResponse negotiates ranges when sent."""
+
+        def __init__(self, path: Path, token: str):
+            super().__init__(path, media_type=_audio_media_type(str(path)))
+            self.share_token = token
+
+        async def __call__(self, scope, receive, send) -> None:
+            async def send_with_counter(message):
+                if message["type"] == "http.response.start" and message["status"] == 200:
+                    await count_share_use(self.share_token, play=True)
+                await send(message)
+
+            await super().__call__(scope, receive, send_with_counter)
+
     @app.get("/public/s/{token}/audio")
-    async def public_share_audio(token: str, request: Request, track: str = "") -> Response:
+    async def public_share_audio(
+        token: str, request: Request, track: str = "", first: str | None = None,
+    ) -> Response:
         resolved = await resolve_share(token, request, "audio")
         if isinstance(resolved, Response):
             return resolved
@@ -1160,12 +1185,17 @@ def create_app() -> FastAPI:
                                        session_id=state.id, job_id=job_id)
             if path is None:
                 return _share_error(404, "share_track_not_found", "share.track_not_found")
-            return await _stream_storage_audio(request, settings, path, download=False)
+            audio = await _stream_storage_audio(request, settings, path, download=False)
+            if first == "1" and audio.status_code == 200:
+                await count_share_use(token, play=True)
+            return audio
         if not isinstance(output, str):
             return _share_error(404, "share_track_not_found", "share.track_not_found")
         path = (settings.project_root / output).resolve()
         if not path.is_relative_to(sessions.session_dir(state.id)) or not path.is_file():
             return _share_error(404, "share_track_not_found", "share.track_not_found")
+        if first == "1":
+            return SharePlayFileResponse(path, token)
         return FileResponse(path, media_type=_audio_media_type(str(path)))
 
     @app.patch("/songs/{session_id}")
@@ -1628,6 +1658,10 @@ def create_app() -> FastAPI:
         file_name = path.rsplit("/", 1)[-1]
         url, expires = await asyncio.to_thread(
             signed_download_url, settings.storage_bucket, path, file_name)
+        try:
+            await asyncio.to_thread(count_zip_download, job_id)
+        except Exception:
+            logger.warning("Could not update Sing All ZIP download counter.")
         return {"url": url, "fileName": file_name, "expiresAt": expires.isoformat()}
 
     @app.post("/sing-all/quote")
