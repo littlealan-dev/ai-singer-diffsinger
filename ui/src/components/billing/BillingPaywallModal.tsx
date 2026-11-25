@@ -35,7 +35,11 @@ export type PaywallTrigger =
   | "drag_blocked"
   | "credits_pill"
   | "billing_menu"
-  | "checkout_sync";
+  | "checkout_sync"
+  // The Sing All quote card's Top up and Upgrade: the same paywall as insufficient_credits and
+  // billing_menu, named so the billing events say the purchase started from Sing All.
+  | "sing_all_topup"
+  | "sing_all_upgrade";
 
 type BillingPaywallModalProps = {
   isOpen: boolean;
@@ -478,7 +482,7 @@ export function BillingPaywallModal({
               <TopupPlanCard
                 billing={billing}
                 busy={busyAction === "topup"}
-                emphasized={trigger === "credits_exhausted" || trigger === "insufficient_credits"}
+                emphasized={trigger === "credits_exhausted" || trigger === "insufficient_credits" || trigger === "sing_all_topup"}
                 disabled={billing.loading || Boolean(billing.error) || billing.topupActivePackCount >= 3}
                 onCheckout={handleTopupCheckout}
               />
@@ -765,6 +769,7 @@ function getTriggerCopy(trigger: PaywallTrigger, billing: BillingState): { title
         subtitle: "You now receive 8 credits every month. Upgrade any time for more monthly credits.",
       };
     case "insufficient_credits":
+    case "sing_all_topup":
       return {
         title: "This take needs more credits",
         subtitle: "Upgrade to continue with more monthly generation time.",
@@ -808,6 +813,7 @@ function getTriggerCopy(trigger: PaywallTrigger, billing: BillingState): { title
         subtitle: "A plan for every singer, creator, and choir leader.",
       };
     case "billing_menu":
+    case "sing_all_upgrade":
     default:
       return {
         title: "Upgrade your studio",
@@ -835,6 +841,7 @@ function isHardBlockTrigger(trigger: PaywallTrigger): boolean {
     trigger === "credits_exhausted" ||
     trigger === "overdrafted" ||
     trigger === "insufficient_credits" ||
+    trigger === "sing_all_topup" ||
     trigger === "upload_blocked" ||
     trigger === "chat_blocked" ||
     trigger === "selection_blocked" ||

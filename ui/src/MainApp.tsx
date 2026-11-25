@@ -5984,8 +5984,8 @@ export default function MainApp() {
                     onStarted={(jobId, progress) => handleSingAllStarted(msg.id, jobId, progress)}
                     onLoadJob={loadSingAllJob}
                     onOpenSong={(songId) => navigate(`/app/song/${songId}`)}
-                    onTopUp={() => openPaywall("insufficient_credits")}
-                    onUpgrade={() => openPaywall("billing_menu")}
+                    onTopUp={() => openPaywall("sing_all_topup")}
+                    onUpgrade={() => openPaywall("sing_all_upgrade")}
                     billingKey={`${billing.activePlanKey}:${available}`}
                     onStop={handleSingAllStop}
                     onJobUpdated={handleSingAllJobUpdated}
