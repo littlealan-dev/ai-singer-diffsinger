@@ -99,7 +99,7 @@ export type SongInfo = {
   last_active_at?: string;
   /** Present on a workspace's Song: whether this user can share, and the link while it is on. */
   share?: SongShare;
-  /** Present on a workspace's Song: its credits, license and description. */
+  /** Present on a workspace's Song and an upload's: its credits, license and description. */
   info?: SongInfoFields;
 };
 

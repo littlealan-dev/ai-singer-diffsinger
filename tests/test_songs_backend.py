@@ -271,7 +271,7 @@ def test_a_session_becomes_a_song_at_its_first_upload(client):
     song = upload.json()["song"]
     # The test parser's score is titled "Test".
     assert (song["id"], song["title"], song["title_edited"]) == (session_id, "Test", False)
-    assert set(song) == {"id", "title", "title_edited", "created_at"}
+    assert set(song) == {"id", "title", "title_edited", "created_at", "info"}
 
     [row] = test_client.get("/songs").json()["songs"]
     assert row == {

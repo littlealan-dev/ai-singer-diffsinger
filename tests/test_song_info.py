@@ -217,6 +217,23 @@ def test_patch_edits_song_info_and_refuses_a_bad_field(client):
     assert (after["license"], after["producer"], after["composer"]) == ("cc_by_4", "", "Ann Example")
 
 
+def test_the_upload_answers_the_songs_info_so_the_page_can_show_it(client):
+    """First upload and Replace both answer the same info as opening the Song; a new score has no voices."""
+    test_client, app = client
+    session_id = _create_session(test_client)
+    composer = "<identification><creator type='composer'>Ann Example</creator></identification>"
+    uploaded = _upload_score(test_client, session_id, content=_xml(composer).encode()).json()["song"]
+    assert uploaded["info"] == test_client.get(f"/songs/{session_id}/workspace").json()["song"]["info"]
+    assert (uploaded["info"]["composer"], uploaded["info"]["voices"]) == ("Ann Example", [])
+
+    take = _start_take(app, session_id, "sung-take", voicebankName="Made-up Voice")
+    asyncio.run(app.state.sessions.record_take(session_id, "sung-take", take))
+    test_client.patch(f"/songs/{session_id}", json={"info": {"lyricist": "Cat Example"}})
+    replaced = _upload_score(test_client, session_id, content=_xml(composer).encode()).json()["song"]
+    assert replaced["info"] == test_client.get(f"/songs/{session_id}/workspace").json()["song"]["info"]
+    assert (replaced["info"]["lyricist"], replaced["info"]["voices"]) == ("Cat Example", [])
+
+
 def test_workspace_info_lists_the_voices_of_the_sung_tracks(client):
     """The voices come from the same usable tracks the player shows, read after them."""
     test_client, app = client

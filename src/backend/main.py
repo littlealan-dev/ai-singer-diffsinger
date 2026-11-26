@@ -1494,7 +1494,7 @@ def create_app() -> FastAPI:
             # successful synthesis request, not while parsing an upload.
             "performance_midi": None,
             "solfege_settings": _default_solfege_settings_response(),
-            "song": _upload_song_block((await _get_session_or_404(sessions, session_id, user_id)).song()),
+            "song": _upload_song_block(await _get_session_or_404(sessions, session_id, user_id)),
         }
 
     @app.get("/sing-all/active")
@@ -3452,10 +3452,14 @@ async def _json_body_or_none(request: Request) -> Any:
         return None
 
 
-def _upload_song_block(song: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _upload_song_block(state: Any) -> Optional[Dict[str, Any]]:
+    song = state.song()
     if song is None:
         return None
-    return {key: song[key] for key in ("id", "title", "title_edited", "created_at")}
+    block = {key: song[key] for key in ("id", "title", "title_edited", "created_at")}
+    # The player belongs to one score, so a newly uploaded score has no sung voices yet.
+    block["info"] = songs.song_info_response(state.song_info, title=state.title, voices=[])
+    return block
 
 
 async def _with_song_status(job_store: JobStore, rows: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
