@@ -2227,6 +2227,36 @@ def test_change_plan_opens_the_portal_confirm_page_for_the_target_price():
     }
 
 
+@pytest.mark.parametrize(
+    "return_path,expected_path",
+    [
+        ("/app/song/3f9c2a7b1d4e4f6a8b0c1d2e3f4a5b6c", "/app/song/3f9c2a7b1d4e4f6a8b0c1d2e3f4a5b6c"),
+        ("/app", "/app"),
+        (None, "/app"),
+        # Anything that isn't an app page falls back, so the link can't send users elsewhere.
+        ("//evil.example/app", "/app"),
+        ("https://evil.example/app", "/app"),
+        ("/app/song/../../admin", "/app"),
+        ("/legal/terms", "/app"),
+    ],
+)
+def test_portal_returns_to_the_page_the_user_left(return_path, expected_path):
+    _paid_user("switch-return-path")
+    fake_stripe = _switch_client()
+    config = dataclasses.replace(get_billing_config(), portal_return_url="https://app.test/app?billing=sync")
+
+    create_plan_change_session(
+        "switch-return-path", "max_early_monthly", return_path=return_path, config=config, stripe_client=fake_stripe
+    )
+    create_portal_session("switch-return-path", return_path=return_path, config=config, stripe_client=fake_stripe)
+
+    change, manage = fake_stripe.created_portal_sessions[-2:]
+    redirect = change["flow_data"]["after_completion"]["redirect"]["return_url"]
+    assert change["return_url"] == f"https://app.test{expected_path}?billing=sync"
+    assert redirect == f"https://app.test{expected_path}?billing=sync&change=done"
+    assert manage["return_url"] == f"https://app.test{expected_path}?billing=sync"
+
+
 def test_change_plan_keeps_the_return_url_query():
     _paid_user("switch-user-query")
     fake_stripe = _switch_client()

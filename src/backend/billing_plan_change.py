@@ -9,13 +9,13 @@ plan, and keeps a booked change on the billing doc so the app can show and undo 
 
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import stripe
 from google.cloud import firestore
 
 from src.backend.billing_config import BillingConfig, get_billing_config, get_stripe_v1_client
 from src.backend.billing_plans import get_plan, get_plan_for_price_id, is_on_sale_plan
+from src.backend.billing_portal import portal_return_url
 from src.backend.billing_store import get_billing_state
 from src.backend.billing_subscription_sync import (
     _list_customer_subscriptions,
@@ -38,6 +38,7 @@ def create_plan_change_session(
     uid: str,
     plan_key: str,
     *,
+    return_path: str | None = None,
     config: BillingConfig | None = None,
     stripe_client: Any | None = None,
 ) -> str:
@@ -83,7 +84,7 @@ def create_plan_change_session(
                 "customer": stripe_customer_id,
                 "configuration": billing_config.portal_configuration_id,
                 # The portal's "back" link: the user gave up, so no change=done.
-                "return_url": billing_config.portal_return_url,
+                "return_url": portal_return_url(billing_config, return_path),
                 "flow_data": {
                     "type": "subscription_update_confirm",
                     "subscription_update_confirm": {
@@ -92,7 +93,7 @@ def create_plan_change_session(
                     },
                     "after_completion": {
                         "type": "redirect",
-                        "redirect": {"return_url": _with_query(billing_config.portal_return_url, change="done")},
+                        "redirect": {"return_url": portal_return_url(billing_config, return_path, change="done")},
                     },
                 },
             },
@@ -234,12 +235,6 @@ def _stripe_id(value: Any) -> str | None:
         identifier = value.get("id")
         return identifier if isinstance(identifier, str) and identifier else None
     return None
-
-
-def _with_query(url: str, **params: str) -> str:
-    parts = urlsplit(url)
-    query = parse_qsl(parts.query, keep_blank_values=True) + list(params.items())
-    return urlunsplit(parts._replace(query=urlencode(query)))
 
 
 def _v1(stripe_client: Any | None) -> Any:

@@ -704,7 +704,8 @@ function PlanChangeAction({ plan, billing, kind, busy, disabled, onChangePlan }:
     : billing.scheduledChange
       ? "Keep your plan above to choose another change"
       : null;
-  const note = blockedNote ?? (planChangeAppliesNow(kind) ? "Pay the difference today" : `From ${renewal}`);
+  // A change that applies now needs no note: the user pays the new price today.
+  const note = blockedNote ?? (planChangeAppliesNow(kind) ? null : `From ${renewal}`);
   return (
     <div className="billing-plan-change">
       <button
@@ -715,7 +716,7 @@ function PlanChangeAction({ plan, billing, kind, busy, disabled, onChangePlan }:
       >
         {busy ? "Opening Billing..." : label}
       </button>
-      <span className="billing-plan-change-note">{note}</span>
+      {note ? <span className="billing-plan-change-note">{note}</span> : null}
     </div>
   );
 }

@@ -40,15 +40,20 @@ export async function startEmbeddedTopupCheckout(): Promise<EmbeddedCheckoutResp
   return createEmbeddedCheckoutSession({ checkoutType: "topup", packKey: "topup_15" });
 }
 
+/** The page to come back to from Stripe's portal: the Song the user is working on, or /app. */
+function currentAppPath(): string {
+  return typeof window === "undefined" ? "/app" : window.location.pathname;
+}
+
 export async function startBillingPortal(): Promise<string> {
-  const { url } = await createPortalSession();
+  const { url } = await createPortalSession(currentAppPath());
   storePendingBillingPortalSync();
   return url;
 }
 
 /** Open the Stripe portal's confirm page for one plan change; the portal returns to the app. */
 export async function startPlanChange(planKey: BillingPlanKey): Promise<string> {
-  const { url } = await createPlanChangeSession(planKey);
+  const { url } = await createPlanChangeSession(planKey, currentAppPath());
   storePendingBillingPortalSync();
   if (typeof window !== "undefined") {
     const pending: PendingPlanChange = { planKey, startedAt: Date.now() };

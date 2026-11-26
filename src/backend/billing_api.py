@@ -47,6 +47,15 @@ class BillingCheckoutSyncRequest(BaseModel):
     sessionId: str
 
 
+class BillingPortalRequest(BaseModel):
+    # The app page to come back to, e.g. /app/song/{id}; only app pages are accepted.
+    returnPath: str | None = None
+
+
+class BillingPlanChangeRequest(BillingPortalRequest):
+    planKey: str
+
+
 def create_billing_app() -> FastAPI:
     """Create a lightweight billing API app without synthesis worker startup."""
     configure_logging()
@@ -214,20 +223,25 @@ def create_billing_app() -> FastAPI:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
     @app.post("/billing/portal-session")
-    async def create_billing_portal_session(request: Request) -> Dict[str, str]:
+    async def create_billing_portal_session(
+        request: Request,
+        body: BillingPortalRequest | None = None,
+    ) -> Dict[str, str]:
         user_id, _ = await _get_user_context_or_401(request)
         from src.backend.billing_portal import create_portal_session
         from src.backend.billing_types import BillingHttpError
 
         try:
-            url = await asyncio.to_thread(create_portal_session, user_id)
+            url = await asyncio.to_thread(
+                create_portal_session, user_id, return_path=body.returnPath if body else None
+            )
         except BillingHttpError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         return {"url": url}
 
     @app.post("/billing/change-plan")
     async def create_billing_plan_change_session(
-        body: BillingCheckoutRequest,
+        body: BillingPlanChangeRequest,
         request: Request,
     ) -> Dict[str, str]:
         user_id, _ = await _get_user_context_or_401(request)
@@ -235,7 +249,9 @@ def create_billing_app() -> FastAPI:
         from src.backend.billing_types import BillingHttpError
 
         try:
-            url = await asyncio.to_thread(create_plan_change_session, user_id, body.planKey)
+            url = await asyncio.to_thread(
+                create_plan_change_session, user_id, body.planKey, return_path=body.returnPath
+            )
         except BillingHttpError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         return {"url": url}

@@ -946,15 +946,19 @@ export async function syncBillingSubscription(): Promise<BillingSubscriptionSync
   return request("/billing/subscription/sync", { method: "POST" });
 }
 
-export async function createPortalSession(): Promise<BillingPortalResponse> {
-  return request("/billing/portal-session", { method: "POST" });
+export async function createPortalSession(returnPath: string): Promise<BillingPortalResponse> {
+  return request("/billing/portal-session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ returnPath }),
+  });
 }
 
-export async function createPlanChangeSession(planKey: string): Promise<BillingPortalResponse> {
+export async function createPlanChangeSession(planKey: string, returnPath: string): Promise<BillingPortalResponse> {
   return request("/billing/change-plan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ planKey }),
+    body: JSON.stringify({ planKey, returnPath }),
   });
 }
 
