@@ -148,7 +148,7 @@ export function getDisplayPlans(
   options: DisplayPlanOptions = {}
 ): DisplayPlan[] {
   const choirEarlySupporterEnabled = options.choirEarlySupporterEnabled ?? true;
-  const maxEarlySupporterEnabled = options.maxEarlySupporterEnabled ?? true;
+  const maxEarlySupporterEnabled = options.maxEarlySupporterEnabled ?? false;
   const plans = BASE_PLANS.filter((plan) => plan.cardKey !== "max" || maxEarlySupporterEnabled);
   return plans.map((plan) => {
     const price = plan.cardKey === "choir" ? getChoirPrice(choirEarlySupporterEnabled) : plan.price;

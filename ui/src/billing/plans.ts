@@ -25,7 +25,8 @@ export const PENDING_CHECKOUT_PLAN_KEY = "sightsinger.pendingCheckoutPlan";
 
 const DEFAULT_EARLY_SUPPORTER_ENABLED =
   import.meta.env.VITE_CHOIR_EARLY_SUPPORTER_ENABLED !== "false";
-const MAX_EARLY_SUPPORTER_ENABLED = import.meta.env.VITE_MAX_EARLY_SUPPORTER_ENABLED !== "false";
+// Max stays hidden until its Stripe prices exist: the build turns it on with "true".
+const MAX_EARLY_SUPPORTER_ENABLED = import.meta.env.VITE_MAX_EARLY_SUPPORTER_ENABLED === "true";
 
 export function getDisplayPlans(interval: BillingInterval = "annual") {
   return getSharedDisplayPlans(interval, {
