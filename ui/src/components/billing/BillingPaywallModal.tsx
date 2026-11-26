@@ -636,12 +636,17 @@ function CreditRatesTable() {
             <td>1 credit per 2 minutes</td>
             <td>Once per uploaded score, regardless of the number of instrument tracks</td>
           </tr>
+          <tr>
+            <th scope="row">Sing All mixes</th>
+            <td>1 credit per mix file</td>
+            <td>For each full mix and part-dominant mix you choose, whatever its length</td>
+          </tr>
         </tbody>
       </table>
       <p>
-        Rounded up. Length follows your With repeats setting. The quote shows the exact credits
-        before you confirm, and the final charge uses the actual audio length. Downloading the
-        real-time mix is free.
+        Vocal and instrumental time is rounded up, and its length follows your With repeats
+        setting. The quote shows the exact credits before you confirm, and the final charge uses
+        the actual audio length. Downloading the real-time mix is free.
       </p>
     </div>
   );
