@@ -537,8 +537,13 @@ body.legal-active #root {
   transition: background 0.2s ease;
 }
 
-.user-menu-item:hover {
+.user-menu-item:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.12);
+}
+
+.user-menu-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .icon-button {

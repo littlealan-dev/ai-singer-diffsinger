@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 import logging
 
+from src.backend.app_help import APP_HELP_TOPICS
 from src.mcp.handlers import HANDLERS
 from src.mcp.logging_utils import summarize_payload
 
@@ -1985,6 +1986,24 @@ TOOLS: List[Tool] = [
             "additionalProperties": False,
         },
         output_schema={"type": "object", "additionalProperties": True},
+    ),
+    Tool(
+        name="app_help",
+        description=(
+            "Read how to do something with the app's on-screen controls, which only the user can "
+            "operate. Call it when the user asks how to do, find or change something in the app, or "
+            "what something costs. Answer from the returned text and name only the controls it names."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"topic": {"type": "string", "enum": APP_HELP_TOPICS}},
+            "required": ["topic"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {"topic": {"type": "string"}, "help": {"type": "string"}},
+        },
     ),
     Tool(
         name="prepare_synthesis_quote",

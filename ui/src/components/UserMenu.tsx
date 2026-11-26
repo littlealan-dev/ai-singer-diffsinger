@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bell, ChevronDown, CreditCard, LogOut } from "lucide-react";
+import { Bell, ChevronDown, CircleHelp, CreditCard, LogOut } from "lucide-react";
 import { useAuth } from "../hooks/useAuth.tsx";
 import { logOut } from "../firebase";
 import { formatPlanBadge, type BillingPlanKey } from "../billing/plans";
@@ -21,6 +21,10 @@ const resolveMarketingBaseUrl = (value?: string): string => {
 };
 
 type UserMenuProps = {
+  /** Asks the chat for help: sends "Help" as the user's message. */
+  onHelp?: () => void;
+  /** True while the chat can't take a message, such as during a reply. */
+  helpDisabled?: boolean;
   onJoinWaitlist?: () => void;
   onBilling?: () => void;
   activePlanKey?: BillingPlanKey;
@@ -28,6 +32,8 @@ type UserMenuProps = {
 };
 
 export function UserMenu({
+  onHelp,
+  helpDisabled = false,
   onJoinWaitlist,
   onBilling,
   activePlanKey = "free",
@@ -105,6 +111,20 @@ export function UserMenu({
             </div>
             {email && <div className="user-menu-email">{email}</div>}
           </div>
+          {onHelp && (
+            <button
+              className="user-menu-item"
+              type="button"
+              disabled={helpDisabled}
+              onClick={() => {
+                onHelp();
+                setOpen(false);
+              }}
+            >
+              <CircleHelp size={16} />
+              Help
+            </button>
+          )}
           {onBilling && stripeCustomerId && (
             <button
               className="user-menu-item"

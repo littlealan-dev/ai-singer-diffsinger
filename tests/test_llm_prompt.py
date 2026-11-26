@@ -1147,14 +1147,10 @@ def test_prompt_points_users_to_app_controls_instead_of_refusing() -> None:
 
     for text in (
         "App controls outside the chat:",
+        "call `app_help` with the topic that fits",
         "Do not say it cannot be done, and do not claim you did it.",
-        "Name only the controls listed here.",
-        "`.musicxml`, `.xml` or compressed `.mxl`",
-        "Mute, Solo and a volume slider",
-        '"Download mix (real-time)"',
-        "as one WAV file",
-        "up to 5 minutes long",
-        "render each part as its own take, then download the mix",
+        "Name only the controls that text names.",
+        "If no topic covers it, say it is not available.",
     ):
         assert text in prompt
     assert prompt.count("App controls outside the chat:") == 1
@@ -1167,30 +1163,15 @@ def test_app_controls_are_in_the_cached_static_prompt() -> None:
     assert "App controls outside the chat:" not in bundle.dynamic_prompt_text
 
 
-def test_app_controls_name_only_controls_that_exist_in_the_ui() -> None:
+def test_app_controls_tie_on_screen_settings_to_their_prompt_rules() -> None:
+    """The controls' details are in the help file (tests/test_app_help.py); these stay here."""
     prompt = _role_prompt("default")
     ui_source = (
         Path(__file__).resolve().parents[1] / "ui" / "src" / "MainApp.tsx"
     ).read_text()
 
-    for label in (
-        "Add a score",
-        "Upload MusicXML…",
-        "Tracks & Stems",
-        "Download mix (real-time)",
-        "Download score",
-        "Print score",
-        "Page view",
-        "Horizontal view",
-        "With Repeats",
-        "Instrumental Level",
-    ):
-        assert label in prompt
-        assert label in ui_source
-
-    assert 'accept=".musicxml,.xml,.mxl"' in ui_source
-    assert "BROWSER_MIX_BOUNCE_MAX_DURATION_SECONDS = 5 * 60" in ui_source
-    assert 'BROWSER_MIX_RECORDING_MIME_TYPE = "audio/wav"' in ui_source
+    assert 'The "With Repeats" toggle, the voice picker and the solfege settings' in prompt
+    assert "With Repeats" in ui_source
 
 
 def test_preprocess_prompt_describes_complete_staff_lane_bounds() -> None:

@@ -152,6 +152,8 @@ const ensureExtendableWavRecorderRegistered = (): Promise<void> => {
 
 // The Sing All hint's chat message (UI prototype: the chat reply that opens the card is faked).
 const SING_ALL_PROMPT = "Sing All";
+// The user menu's Help item; the chat model answers by asking what to help with.
+const HELP_PROMPT = "Help";
 const STARTING_CONVERSATIONS = [
   "sing the vocal part, verse 1",
   "sing the soprano part",
@@ -5722,6 +5724,8 @@ export default function MainApp() {
             Upgrade
           </button>
           <UserMenu
+            onHelp={() => void sendMessage(HELP_PROMPT)}
+            helpDisabled={chatTurnInProgress || browserMixBounceActive}
             activePlanKey={billing.activePlanKey}
             stripeCustomerId={billing.stripeCustomerId}
             onBilling={handleOpenBillingPortal}

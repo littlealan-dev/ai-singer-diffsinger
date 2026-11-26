@@ -51,6 +51,7 @@ from src.backend.gpu_errors import (
 )
 from src.backend.job_store import JobStore
 from src.backend.firebase_app import get_firestore_client
+from src.backend.app_help import APP_HELP
 from src.backend.sing_all import open_sing_all_result
 from src.backend.sing_all_store import active_job_for_song, child_allowed
 from src.backend.sing_all_prompts import quote_prompt, style_prompt
@@ -251,7 +252,10 @@ TOOL_MODIFY_SOLFEGE_SETTINGS = "modify_solfege_settings"
 TOOL_PREPROCESS_VOICE_PARTS = "preprocess_voice_parts"
 TOOL_START_PREPROCESS_WORKFLOW = "start_preprocess_voice_part_workflow"
 TOOL_OPEN_SING_ALL = "open_sing_all"
+# Read-only: how to use the app's on-screen controls, from config/app_help.md.
+TOOL_APP_HELP = "app_help"
 DEFAULT_LLM_TOOL_ALLOWLIST = {
+    TOOL_APP_HELP,
     TOOL_REPARSE,
     TOOL_PREPARE_SYNTHESIS_QUOTE,
     TOOL_SYNTHESIZE,
@@ -8790,9 +8794,27 @@ class Orchestrator:
                 TOOL_MODIFY_SOLFEGE_SETTINGS,
                 TOOL_REPLACE_BIRTHDAY_NAME,
                 TOOL_OPEN_SING_ALL,
+                TOOL_APP_HELP,
             }:
                 self._logger.warning("llm_tool_not_allowed tool=%s", call.name)
                 continue
+            if call.name == TOOL_APP_HELP:
+                # Reads nothing and changes nothing, so it needs no score and runs during a
+                # Sing All. The model words the answer from the topic's text.
+                topic = call.arguments.get("topic")
+                if topic in APP_HELP:
+                    self._logger.info("app_help topic=%s", topic)
+                    payload: Dict[str, Any] = {"topic": topic, "help": APP_HELP[topic]}
+                else:
+                    self._logger.warning("app_help_unknown_topic topic=%s", topic)
+                    payload = {"status": "unknown_topic", "topic": topic, "topics": list(APP_HELP)}
+                return ToolExecutionResult(
+                    score=current_score,
+                    audio_response={"type": "chat_text", "message": ""},
+                    followup_prompt=json.dumps(payload, sort_keys=True, ensure_ascii=False),
+                    followup_message_only=True,
+                    explicit_verse_number=selected_explicit_verse_number,
+                )
             if call.name in {
                 TOOL_REPARSE, TOOL_PREPROCESS_VOICE_PARTS, TOOL_PREPARE_SYNTHESIS_QUOTE,
                 TOOL_SYNTHESIZE, TOOL_ADD_SOLFEGE_VERSE, TOOL_MODIFY_SOLFEGE_SETTINGS,
