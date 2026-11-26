@@ -191,7 +191,7 @@ def get_billing_config() -> BillingConfig:
         checkout_cancel_url=_required_env("STRIPE_CHECKOUT_CANCEL_URL"),
         portal_return_url=_required_env("STRIPE_PORTAL_RETURN_URL"),
         portal_configuration_id=_required_env("STRIPE_PORTAL_CONFIGURATION_ID"),
-        stripe_api_version=os.getenv("STRIPE_API_VERSION", "2026-02-25.clover").strip(),
+        stripe_api_version=os.getenv("STRIPE_API_VERSION", "2026-11-18.endive").strip(),
     )
 
 
@@ -221,10 +221,9 @@ def get_stripe_client():
     if hasattr(stripe, "api_version"):
         stripe.api_version = config.stripe_api_version
     if hasattr(stripe, "StripeClient"):
-        try:
-            return stripe.StripeClient(config.stripe_secret_key)
-        except TypeError:
-            return stripe.StripeClient(config.stripe_secret_key, stripe_version=config.stripe_api_version)
+        # Without stripe_version the client sends the SDK's own pinned version, whatever
+        # STRIPE_API_VERSION says, so the API version would move with every SDK upgrade.
+        return stripe.StripeClient(config.stripe_secret_key, stripe_version=config.stripe_api_version)
     return stripe
 
 
