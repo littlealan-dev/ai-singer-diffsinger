@@ -40,6 +40,10 @@ import {
   type MultiTrackAudioTrack,
   type VocalMode,
 } from "../player/tracks";
+import {
+  shareControlUse, shareCtaClick, shareLinkCopied, shareListenProgress, sharePageUnavailable,
+  sharePageView, sharePlay, type ShareControl,
+} from "../analytics";
 import { startRows, type ShareRows } from "./startRows";
 import "./SharePage.css";
 
@@ -56,8 +60,13 @@ const decodeShareTake = async (url: string): Promise<AudioBuffer> =>
 /** A shared Song: the score and its sung parts, to listen to and follow. Nothing here edits or saves. */
 export default function SharePage() {
   const { token = "" } = useParams();
+  return <SharedLink key={token} token={token} />;
+}
+
+function SharedLink({ token }: { token: string }) {
   const { authReady, user } = useAuth();
   const [load, setLoad] = useState<Load>({ kind: "loading" });
+  const pageReported = useRef(false);
 
   useEffect(() => {
     const meta = document.createElement("meta");
@@ -77,8 +86,8 @@ export default function SharePage() {
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        if (err instanceof ApiError && err.code === "share_off") setLoad({ kind: "off" });
-        else if (err instanceof ApiError && err.code === "rate_limited") setLoad({ kind: "busy" });
+        if (err instanceof ApiError && err.status === 404 && err.code === "share_off") setLoad({ kind: "off" });
+        else if (err instanceof ApiError && err.status === 429) setLoad({ kind: "busy" });
         else setLoad({ kind: "error", message: err instanceof Error ? err.message : "Couldn't open this song." });
       });
     return () => {
@@ -88,20 +97,44 @@ export default function SharePage() {
 
   useEffect(() => {
     if (load.kind === "ready") document.title = `${load.data.title} · SightSinger`;
-  }, [load]);
+    if (load.kind === "loading" || pageReported.current) return;
+    pageReported.current = true;
+    if (load.kind !== "ready") {
+      sharePageUnavailable(load.kind);
+      return;
+    }
+    const { player, info, is_owner: isOwner } = load.data;
+    sharePageView({
+      signedIn: Boolean(user),
+      isOwner,
+      layout: window.matchMedia("(min-width: 900px) and (orientation: landscape)").matches ? "laptop" : "portrait",
+      parts: player.vocals.length,
+      bothModes: vocalsInBothModes(player.vocals),
+      hasInstruments: Boolean(player.midi_url),
+      infoFields: info ? [
+        info.subtitle, ...songInfoRows(info).map(([, value]) => value),
+        info.score_copyright, info.description,
+      ].filter(Boolean).length : 0,
+      license: info?.license ?? "all_rights_reserved",
+    });
+  }, [load, user]);
 
   return (
     <div className="share-page">
       <header className="share-page-header">
-        <Link to="/" className="share-page-brand">SightSinger</Link>
+        <Link to="/" className="share-page-brand" onClick={() => shareCtaClick("brand")}>SightSinger</Link>
         <div className="share-page-header-actions">
           {load.kind === "ready" && load.data.is_owner && load.data.song_id ? (
-            <Link className="btn-secondary-inline" to={`/app/song/${load.data.song_id}`}>
+            <Link
+              className="btn-secondary-inline"
+              to={`/app/song/${load.data.song_id}`}
+              onClick={() => shareCtaClick("open_in_app")}
+            >
               Open in SightSinger
             </Link>
           ) : null}
           {authReady && !user ? (
-            <Link className="btn-secondary-inline" to="/app">Sign in</Link>
+            <Link className="btn-secondary-inline" to="/app" onClick={() => shareCtaClick("sign_in")}>Sign in</Link>
           ) : null}
         </div>
       </header>
@@ -127,7 +160,8 @@ function SharedSong({ data }: { data: SharePageData }) {
   const [scoreXml, setScoreXml] = useState<string | null>(null);
   const [scoreError, setScoreError] = useState<string | null>(null);
   const [decoded, setDecoded] = useState<ReadonlyMap<string, AudioBuffer>>(() => new Map());
-  const [decoding, setDecoding] = useState(data.player.vocals.length > 0);
+  const [vocalsRequested, setVocalsRequested] = useState(false);
+  const [decoding, setDecoding] = useState(false);
   const [instrumentsArmed, setInstrumentsArmed] = useState(false);
   const [midiUrl, setMidiUrl] = useState<string | null>(null);
   const [controls, setControls] = useState<ScorePlayerPlaybackControls | null>(null);
@@ -141,6 +175,15 @@ function SharedSong({ data }: { data: SharePageData }) {
   const controlsRef = useRef<ScorePlayerPlaybackControls | null>(null);
   const assetsReadyRef = useRef(false);
   const playPendingRef = useRef(false);
+  const midiPendingRef = useRef(false);
+  const firstVocalKey = useRef<string>();
+  const sentFirstTrackFlag = useRef(false);
+  const playReported = useRef(false);
+  const usedControls = useRef(new Set<ShareControl>());
+  const listenedMarks = useRef(new Set<number>());
+  const timelineDuration = useRef(0);
+  const lastPlaybackPosition = useRef(0);
+  const wasPlaying = useRef(false);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<HorizontalScoreRendererHandle | null>(null);
   const pageOsmdRef = useRef<OpenSheetMusicDisplay | null>(null);
@@ -163,6 +206,21 @@ function SharedSong({ data }: { data: SharePageData }) {
   const listedRows = hasInstrumentRows ? [...shownVocalRows, ...rows.instruments] : shownVocalRows;
   const rowsOn = listedRows.filter((row) => row.on).length;
 
+  const recordControl = useCallback((control: ShareControl) => {
+    if (usedControls.current.has(control)) return;
+    usedControls.current.add(control);
+    shareControlUse(control);
+  }, []);
+
+  useEffect(() => {
+    if (!seekBarHost) return;
+    // The engine portals its range input into this host. Native input events
+    // distinguish an explicit seek from the engine updating the displayed value.
+    const recordSeek = () => recordControl("seek");
+    seekBarHost.addEventListener("input", recordSeek);
+    return () => seekBarHost.removeEventListener("input", recordSeek);
+  }, [seekBarHost, recordControl]);
+
   useEffect(() => {
     let cancelled = false;
     fetchShareScore(data.score.url)
@@ -177,14 +235,22 @@ function SharedSong({ data }: { data: SharePageData }) {
     };
   }, [data.score.url]);
 
-  // Every take is downloaded and decoded once, as the app's player does.
+  // Start downloading on Play. Request the chosen mode's first track first
+  // so passive page views never count as plays.
   useEffect(() => {
+    if (!vocalsRequested) return;
     let cancelled = false;
-    const vocals = data.player.vocals;
-    if (!vocals.length) return;
-    void Promise.allSettled(
-      vocals.map(async (vocal) => [vocal.key, await decodeShareTake(vocal.audio_url)] as const)
-    ).then((results) => {
+    const vocals = [...data.player.vocals];
+    const firstIndex = vocals.findIndex((vocal) => vocal.key === firstVocalKey.current);
+    if (firstIndex > 0) vocals.unshift(...vocals.splice(firstIndex, 1));
+    void Promise.allSettled(vocals.map(async (vocal, index) => {
+      let url = vocal.audio_url;
+      if (index === 0 && !data.is_owner && !sentFirstTrackFlag.current) {
+        sentFirstTrackFlag.current = true;
+        url += `${url.includes("?") ? "&" : "?"}first=1`;
+      }
+      return [vocal.key, await decodeShareTake(url)] as const;
+    })).then((results) => {
       if (cancelled) return;
       const next = new Map<string, AudioBuffer>();
       results.forEach((result) => {
@@ -197,7 +263,7 @@ function SharedSong({ data }: { data: SharePageData }) {
     return () => {
       cancelled = true;
     };
-  }, [data.player.vocals]);
+  }, [data.is_owner, data.player.vocals, vocalsRequested]);
 
   // The instruments' MIDI, and with it the soundfont, load only once a Play needs them.
   useEffect(() => {
@@ -208,11 +274,13 @@ function SharedSong({ data }: { data: SharePageData }) {
       .then((blob) => {
         if (cancelled) return;
         objectUrl = URL.createObjectURL(blob);
+        midiPendingRef.current = false;
         setMidiUrl(objectUrl);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
         setPlayerError(err instanceof Error ? err.message : "Couldn't load the instruments.");
+        midiPendingRef.current = false;
         setInstrumentsArmed(false);
         if (playPendingRef.current && assetsReadyRef.current) startPlayback();
       });
@@ -281,14 +349,41 @@ function SharedSong({ data }: { data: SharePageData }) {
   const handleEngineReady = useCallback(() => {
     assetsReadyRef.current = true;
     setEngineLoading(false);
-    if (playPendingRef.current) startPlayback();
+    if (playPendingRef.current && !midiPendingRef.current) startPlayback();
   }, [startPlayback]);
 
   useEffect(() => {
     controls?.setMasterVolume(volume);
   }, [controls, volume]);
 
+  const recordProgress = useCallback((seconds: number) => {
+    const duration = timelineDuration.current;
+    if (duration <= 0) return;
+    for (const percent of [25, 50, 75, 100] as const) {
+      if (seconds < duration * percent / 100 || listenedMarks.current.has(percent)) continue;
+      listenedMarks.current.add(percent);
+      shareListenProgress(percent);
+    }
+  }, []);
+
+  const handleDuration = useCallback((seconds: number) => {
+    timelineDuration.current = seconds;
+  }, []);
+
+  const handlePlaybackStateChange = useCallback((isPlaying: boolean) => {
+    // The engine can reach the end between animation frames. Explicit pause
+    // and stop clear wasPlaying before the engine reports the state change.
+    const remaining = timelineDuration.current - lastPlaybackPosition.current;
+    if (!isPlaying && wasPlaying.current && remaining <= 0.25) {
+      recordProgress(timelineDuration.current);
+    }
+    wasPlaying.current = isPlaying;
+    setPlaying(isPlaying);
+  }, [recordProgress]);
+
   const handlePosition = useCallback((seconds: number) => {
+    lastPlaybackPosition.current = seconds;
+    recordProgress(seconds);
     const map = summary.performance_measure_map;
     const entries = data.player.repeats ? map?.expanded : map?.written;
     const measure: PerformanceMeasureMapEntry | null = lookupRef.current(entries, seconds);
@@ -310,30 +405,50 @@ function SharedSong({ data }: { data: SharePageData }) {
     } catch {
       // The cursor is visual only; it never stops playback.
     }
-  }, [data.player.repeats, summary.performance_measure_map]);
+  }, [data.player.repeats, recordProgress, summary.performance_measure_map]);
 
   const handlePlay = () => {
     setPlayerError(null);
-    if (anyInstrumentOn && !instrumentsArmed) {
-      // The first Play with an instrument on loads them; playback starts once they are in.
-      setInstrumentsArmed(true);
-      playPendingRef.current = true;
-      return;
+    if (!playReported.current) {
+      playReported.current = true;
+      const mode = bothModes ? modeShown : shownVocalRows[0]?.mode ?? "lyrics";
+      sharePlay(mode, shownVocalRows.filter((row) => row.on).length, anyInstrumentOn);
     }
-    if (controlsRef.current && assetsReadyRef.current) startPlayback();
-    else playPendingRef.current = true;
+
+    // Resume in the user gesture, before waiting for the first audio response.
+    void getToneContext().resume().catch(() => {});
+    const loadVocals = !vocalsRequested && data.player.vocals.length > 0;
+    if (loadVocals) {
+      firstVocalKey.current = (shownVocalRows.find((row) => row.on) ?? shownVocalRows[0])?.key;
+      setVocalsRequested(true);
+      setDecoding(true);
+    }
+    const loadInstruments = anyInstrumentOn && !instrumentsArmed;
+    if (loadInstruments) {
+      midiPendingRef.current = true;
+      setInstrumentsArmed(true);
+    }
+    if (!loadVocals && !loadInstruments && controlsRef.current && assetsReadyRef.current
+        && !midiPendingRef.current) {
+      startPlayback();
+    } else {
+      playPendingRef.current = true;
+    }
   };
   const handlePause = () => {
+    wasPlaying.current = false;
     playPendingRef.current = false;
     controlsRef.current?.pause();
     setPlaying(false);
   };
   const handleZoom = (delta: number) => {
+    recordControl("zoom");
     const next = Math.min(2, Math.max(0.6, zoomLevel + delta));
     setZoomLevel(Math.round(next * 10) / 10);
   };
 
   const handleStop = () => {
+    wasPlaying.current = false;
     playPendingRef.current = false;
     controlsRef.current?.stop();
     controlsRef.current?.setCurrentTime(0);
@@ -341,12 +456,15 @@ function SharedSong({ data }: { data: SharePageData }) {
     setPlaying(false);
   };
 
-  const toggleVocal = (key: string) =>
+  const toggleVocal = (key: string) => {
+    recordControl("part_toggle");
     setRows((current) => ({
       ...current,
       vocals: current.vocals.map((row) => (row.key === key ? { ...row, on: !row.on } : row)),
     }));
+  };
   const toggleInstrument = (key: string) => {
+    recordControl("part_toggle");
     setRows((current) => ({
       ...current,
       instruments: current.instruments.map((row) => (row.key === key ? { ...row, on: !row.on } : row)),
@@ -356,6 +474,7 @@ function SharedSong({ data }: { data: SharePageData }) {
   };
 
   const copyLink = async () => {
+    shareLinkCopied("share_page");
     try {
       await navigator.clipboard.writeText(window.location.href);
       setCopied(true);
@@ -364,7 +483,8 @@ function SharedSong({ data }: { data: SharePageData }) {
     }
   };
 
-  const canPlay = shownVocalRows.some((row) => decoded.has(row.key)) || hasInstrumentRows;
+  const canPlay = !decoding && (shownVocalRows.some((row) => !vocalsRequested || decoded.has(row.key))
+    || hasInstrumentRows);
   const loadingText = decoding
     ? "Loading the sung parts…"
     : instrumentsArmed && (engineLoading || !midiUrl)
@@ -392,7 +512,7 @@ function SharedSong({ data }: { data: SharePageData }) {
               type="button"
               className="score-action-button"
               onClick={playing ? handlePause : handlePlay}
-              disabled={!canPlay}
+              disabled={!playing && !canPlay}
               aria-label={playing ? "Pause" : "Play"}
               title={playing ? "Pause" : "Play"}
             >
@@ -418,7 +538,10 @@ function SharedSong({ data }: { data: SharePageData }) {
                 step={0.01}
                 value={volume}
                 aria-label="Volume"
-                onChange={(event) => setVolume(Number(event.target.value))}
+                onChange={(event) => {
+                  recordControl("volume");
+                  setVolume(Number(event.target.value));
+                }}
               />
             </label>
           </div>
@@ -456,6 +579,7 @@ function SharedSong({ data }: { data: SharePageData }) {
                   title={option === "page" ? "Page view" : "Horizontal view"}
                   disabled={!scoreXml}
                   onClick={() => {
+                    if (option !== layout) recordControl("view_toggle");
                     activeMeasureKeyRef.current = null;
                     setLayout(option);
                   }}
@@ -484,6 +608,7 @@ function SharedSong({ data }: { data: SharePageData }) {
                   className={modeShown === mode ? "selected" : undefined}
                   aria-pressed={modeShown === mode}
                   onClick={() => {
+                    if (mode !== modeShown) recordControl("mode_switch");
                     handleStop();
                     setModeShown(mode);
                   }}
@@ -499,7 +624,10 @@ function SharedSong({ data }: { data: SharePageData }) {
             className="share-song-parts-toggle"
             aria-expanded={partsOpen}
             aria-controls="share-song-rows"
-            onClick={() => setPartsOpen((open) => !open)}
+            onClick={() => {
+              recordControl("parts_fold");
+              setPartsOpen((open) => !open);
+            }}
           >
             <ChevronDown size={16} aria-hidden="true" className="share-song-parts-chevron" />
             <span>Parts</span>
@@ -544,12 +672,12 @@ function SharedSong({ data }: { data: SharePageData }) {
               : null}
           </ul>
           {data.info ? (
-            <ShareSongInfo info={data.info} />
+            <ShareSongInfo info={data.info} onFold={() => recordControl("info_fold")} />
           ) : data.credits.voices.length ? (
             // A backend from before Song Info.
             <p className="share-song-credits">
               Voices: {data.credits.voices.join(", ")} ·{" "}
-              <a href="/credits-and-ai-voices">Credits and AI voices</a>
+              <a href="/credits-and-ai-voices" onClick={() => shareCtaClick("credits_page")}>Credits and AI voices</a>
             </p>
           ) : null}
         </section>
@@ -598,9 +726,9 @@ function SharedSong({ data }: { data: SharePageData }) {
         onControlsChange={handleControlsChange}
         onEngineLoading={handleEngineLoading}
         onEngineReady={handleEngineReady}
-        onPlaybackStateChange={setPlaying}
+        onPlaybackStateChange={handlePlaybackStateChange}
         onPlaybackPositionChange={handlePosition}
-        onTimelineDurationChange={noop}
+        onTimelineDurationChange={handleDuration}
         onAdapterChange={noop}
         onError={setEngineError}
         seekBarHost={seekBarHost}
@@ -613,17 +741,20 @@ function SharedSong({ data }: { data: SharePageData }) {
 const noop = () => undefined;
 
 
-/** The Song's credits, license and description, under Parts; empty fields are left out. */
-function ShareSongInfo({ info }: { info: SongInfoFields }) {
-  const [open, setOpen] = useState(true);
-  const license = SONG_LICENSES[info.license] ?? SONG_LICENSES.all_rights_reserved;
-  const rows: Array<[string, string]> = [
+function songInfoRows(info: SongInfoFields): Array<[string, string]> {
+  return [
     ["Composer", info.composer],
     ["Lyrics by", info.lyricist],
     ["Arranger", info.arranger],
     ["Credits", info.credits ?? ""],
     ["Produced by", info.producer],
   ];
+}
+
+/** The Song's credits, license and description, under Parts; empty fields are left out. */
+function ShareSongInfo({ info, onFold }: { info: SongInfoFields; onFold: () => void }) {
+  const [open, setOpen] = useState(true);
+  const license = SONG_LICENSES[info.license] ?? SONG_LICENSES.all_rights_reserved;
   return (
     <div className="share-song-info">
       <button
@@ -631,14 +762,17 @@ function ShareSongInfo({ info }: { info: SongInfoFields }) {
         className="share-song-parts-toggle"
         aria-expanded={open}
         aria-controls="share-song-info-body"
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => {
+          onFold();
+          setOpen((current) => !current);
+        }}
       >
         <ChevronDown size={16} aria-hidden="true" className="share-song-parts-chevron" />
         <span>Song info</span>
       </button>
       <div id="share-song-info-body" className="share-song-info-body" hidden={!open}>
         <dl className="share-song-info-list">
-          {rows.filter(([, value]) => value).map(([label, value]) => (
+          {songInfoRows(info).filter(([, value]) => value).map(([label, value]) => (
             <div key={label}>
               <dt>{label}</dt>
               <dd>{value}</dd>
@@ -648,7 +782,8 @@ function ShareSongInfo({ info }: { info: SongInfoFields }) {
             <div>
               <dt>Voices</dt>
               <dd>
-                {info.voices.join(", ")} · <a href="/credits-and-ai-voices">Credits and AI voices</a>
+                {info.voices.join(", ")} ·{" "}
+                <a href="/credits-and-ai-voices" onClick={() => shareCtaClick("credits_page")}>Credits and AI voices</a>
               </dd>
             </div>
           ) : null}
@@ -656,7 +791,7 @@ function ShareSongInfo({ info }: { info: SongInfoFields }) {
             <dt>License</dt>
             <dd>
               {license.url ? (
-                <a href={license.url} target="_blank" rel="noreferrer license">
+                <a href={license.url} target="_blank" rel="noreferrer license" onClick={() => shareCtaClick("license")}>
                   {license.label}
                 </a>
               ) : (

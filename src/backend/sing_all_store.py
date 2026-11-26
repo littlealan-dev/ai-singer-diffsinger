@@ -159,6 +159,11 @@ def load(job_id: str) -> dict[str, Any] | None:
     return get_firestore_client().collection("singAllJobs").document(job_id).get().to_dict()
 
 
+def count_zip_download(job_id: str) -> None:
+    ref = get_firestore_client().collection("singAllJobs").document(job_id)
+    ref.update({"zipDownloads": firestore.Increment(1)})
+
+
 def running_jobs() -> list[str]:
     """List parent ids for the scheduler's sweep: running ones, and paused ones for their deadline."""
     docs = (get_firestore_client().collection("singAllJobs")
