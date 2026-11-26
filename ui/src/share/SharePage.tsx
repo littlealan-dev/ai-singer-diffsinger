@@ -15,6 +15,7 @@ import {
   SONG_LICENSES,
   type SongInfoFields,
 } from "../api";
+import { marketingUrl } from "../constants";
 import { useAuth } from "../hooks/useAuth";
 import { createPerformanceMeasureLookup, positionNativeScoreCursor } from "../scorePlayback";
 import {
@@ -680,7 +681,7 @@ function SharedSong({ data }: { data: SharePageData }) {
             // A backend from before Song Info.
             <p className="share-song-credits">
               Voices: {data.credits.voices.join(", ")} ·{" "}
-              <a href="/credits-and-ai-voices" onClick={() => shareCtaClick("credits_page")}>Credits and AI voices</a>
+              <a href={marketingUrl("/credits-and-ai-voices")} onClick={() => shareCtaClick("credits_page")}>Credits and AI voices</a>
             </p>
           ) : null}
         </section>
@@ -786,7 +787,7 @@ function ShareSongInfo({ info, onFold }: { info: SongInfoFields; onFold: () => v
               <dt>Voices</dt>
               <dd>
                 {info.voices.join(", ")} ·{" "}
-                <a href="/credits-and-ai-voices" onClick={() => shareCtaClick("credits_page")}>Credits and AI voices</a>
+                <a href={marketingUrl("/credits-and-ai-voices")} onClick={() => shareCtaClick("credits_page")}>Credits and AI voices</a>
               </dd>
             </div>
           ) : null}

@@ -11,6 +11,7 @@ import {
   updateSongInfo,
 } from "../api";
 import { songInfoSaved } from "../analytics";
+import { marketingUrl } from "../constants";
 import "./SongInfoPanel.css";
 
 const TEXT_FIELDS: Array<{ key: keyof SongInfoEdit; label: string; limit: number }> = [
@@ -158,7 +159,7 @@ export default function SongInfoPanel({ songId, info, onClose, onSaved }: SongIn
             <p className="song-info-voices" data-testid="song-info-voices">
               {loaded.voices.length ? loaded.voices.join(", ") : "No sung parts yet"}
               {" · "}
-              <a href="/credits-and-ai-voices" target="_blank" rel="noreferrer">
+              <a href={marketingUrl("/credits-and-ai-voices")} target="_blank" rel="noreferrer">
                 Credits and AI voices
               </a>
             </p>
