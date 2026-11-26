@@ -33,7 +33,6 @@ export type BillingState = {
   latestPaymentIntentStatus: string | null;
   latestPaymentFailureCode: string | null;
   latestPaymentFailureMessage: string | null;
-  latestInvoicePaymentFailedAt: Date | null;
   stripeCustomerId: string | null;
   cancelAtPeriodEnd: boolean;
   currentPeriodEnd: Date | null;
@@ -64,7 +63,6 @@ const DEFAULT_STATE: Omit<BillingState, "loading" | "error"> = {
   latestPaymentIntentStatus: null,
   latestPaymentFailureCode: null,
   latestPaymentFailureMessage: null,
-  latestInvoicePaymentFailedAt: null,
   stripeCustomerId: null,
   cancelAtPeriodEnd: false,
   currentPeriodEnd: null,
@@ -140,7 +138,6 @@ export function useBillingState(): BillingState {
           latestPaymentIntentStatus: billing.latestPaymentIntentStatus || null,
           latestPaymentFailureCode: billing.latestPaymentFailureCode || null,
           latestPaymentFailureMessage: billing.latestPaymentFailureMessage || null,
-          latestInvoicePaymentFailedAt: toDate(billing.latestInvoicePaymentFailedAt),
           stripeCustomerId: billing.stripeCustomerId || null,
           cancelAtPeriodEnd: Boolean(billing.cancelAtPeriodEnd),
           currentPeriodEnd: toDate(billing.currentPeriodEnd),

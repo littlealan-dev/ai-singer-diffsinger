@@ -226,11 +226,12 @@ export function isCurrentPlanCard(activePlanKey: BillingPlanKey | null | undefin
 }
 
 /**
- * What switching from the active plan to a card's plan does, as Stripe's portal decides it:
- * a dearer plan per month applies now; a cheaper one, or the same plan on the other billing
- * interval, waits for the renewal date.
+ * What switching from the active plan to a card's plan does, as Stripe's portal applies it
+ * (checked in test mode): a dearer plan per month, or the same plan moving to annual, applies
+ * now with the difference paid today; a cheaper plan, or the same plan moving to monthly, waits
+ * for the renewal date.
  */
-export type PlanChangeKind = "current" | "upgrade" | "switch_interval" | "downgrade";
+export type PlanChangeKind = "current" | "upgrade" | "downgrade" | "switch_to_annual" | "switch_to_monthly";
 
 export function getPlanChangeKind(
   activePlanKey: BillingPlanKey | null | undefined,
@@ -240,9 +241,15 @@ export function getPlanChangeKind(
   const target = paidPlanPrice(targetPlanKey);
   if (!active || !target) return null;
   if (active.family === target.family) {
-    return active.interval === target.interval ? "current" : "switch_interval";
+    if (active.interval === target.interval) return "current";
+    return target.interval === "annual" ? "switch_to_annual" : "switch_to_monthly";
   }
   return target.monthlyEquivalentCents > active.monthlyEquivalentCents ? "upgrade" : "downgrade";
+}
+
+/** Whether Stripe applies this change straight away (and charges today), not at renewal. */
+export function planChangeAppliesNow(kind: PlanChangeKind): boolean {
+  return kind === "upgrade" || kind === "switch_to_annual";
 }
 
 function paidPlanPrice(

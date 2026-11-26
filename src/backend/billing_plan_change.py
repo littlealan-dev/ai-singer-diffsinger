@@ -62,8 +62,7 @@ def create_plan_change_session(
         raise BillingHttpError(409, "No subscription to change.")
     if subscription.get("status") not in CHANGEABLE_STATUSES:
         raise BillingHttpError(409, "Fix your payment in Manage Billing first.")
-    if subscription.get("cancel_at_period_end") or subscription.get("cancel_at") is not None:
-        raise BillingHttpError(409, "Your plan is set to end. Renew it in Manage Billing first.")
+    # A subscription set to cancel needs no check: the portal's confirm page renews it.
     if subscription.get("schedule"):
         raise BillingHttpError(409, "You already have a plan change booked. Undo it first.")
     items = ((subscription.get("items") or {}).get("data") or [])

@@ -20,6 +20,7 @@ import {
   getDisplayPlans,
   getPlanChangeKind,
   INCLUDED_IN_EVERY_PLAN_FEATURES,
+  planChangeAppliesNow,
   isCurrentPlanCard,
   isPaidPlanKey,
   type BillingInterval,
@@ -568,9 +569,6 @@ export function BillingPaywallModal({
                   {busyAction === "portal" ? "Opening Billing..." : "Manage Billing"}
                 </button>
               ) : null}
-              {billing.scheduledChange ? (
-                <span>To cancel instead, keep your plan first, then cancel in Manage Billing.</span>
-              ) : null}
               <a href="/legal/terms" target="_blank" rel="noopener noreferrer">
                 Terms
               </a>
@@ -694,18 +692,19 @@ function PlanChangeAction({ plan, billing, kind, busy, disabled, onChangePlan }:
   const label =
     kind === "upgrade"
       ? `Upgrade to ${plan.name}`
-      : kind === "switch_interval"
-        ? `Switch to ${plan.planKey.endsWith("_annual") ? "annual" : "monthly"}`
-        : `Switch to ${plan.name}`;
+      : kind === "switch_to_annual"
+        ? "Switch to annual"
+        : kind === "switch_to_monthly"
+          ? "Switch to monthly"
+          : `Switch to ${plan.name}`;
   const renewal = billing.currentPeriodEnd ? formatDate(billing.currentPeriodEnd) : "your renewal date";
+  // A plan set to cancel can still change: Stripe's confirm page renews it.
   const blockedNote = !changeableStatuses.has(billing.stripeSubscriptionStatus || "")
     ? "Fix your payment in Manage Billing to change plan"
-    : billing.cancelAtPeriodEnd
-      ? "Renew in Manage Billing to change plan"
-      : billing.scheduledChange
-        ? "Keep your plan above to choose another change"
-        : null;
-  const note = blockedNote ?? (kind === "upgrade" ? "Pay the difference today" : `From ${renewal}`);
+    : billing.scheduledChange
+      ? "Keep your plan above to choose another change"
+      : null;
+  const note = blockedNote ?? (planChangeAppliesNow(kind) ? "Pay the difference today" : `From ${renewal}`);
   return (
     <div className="billing-plan-change">
       <button
@@ -748,12 +747,11 @@ function PlanChangeReturnPanel({ billing, onDone }: PlanChangeReturnPanelProps) 
     }
     const name = planLabel(pending.planKey);
     const startedAt = pending.startedAt;
+    // Stripe returns here only after the change went through: a declined card stays on its page.
     if (billing.activePlanKey === pending.planKey && (billing.lastGrantAt?.getTime() ?? 0) >= startedAt) {
       finish(`You're on ${name}: ${billing.monthlyAllowance} credits.`);
     } else if (billing.scheduledChange?.planKey === pending.planKey) {
       finish(`Your plan changes to ${name} on ${formatDate(billing.scheduledChange.at)}.`);
-    } else if ((billing.latestInvoicePaymentFailedAt?.getTime() ?? 0) >= startedAt) {
-      finish("Your payment didn't go through, so your plan hasn't changed. Check your card in Manage Billing.");
     }
   }, [billing, finish, pending]);
 

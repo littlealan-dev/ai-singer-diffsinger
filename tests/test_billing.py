@@ -2242,8 +2242,6 @@ def test_change_plan_keeps_the_return_url_query():
     "subscription_overrides,plan_key,status_code",
     [
         ({"status": "past_due"}, "max_early_monthly", 409),
-        ({"cancel_at_period_end": True}, "max_early_monthly", 409),
-        ({"cancel_at": _ts(datetime(2027, 1, 1, tzinfo=timezone.utc))}, "max_early_monthly", 409),
         ({"schedule": "sub_sched_123"}, "max_early_monthly", 409),
         (
             {"items": {"data": [{"id": "si_a", "price": {"id": "price_choir_early_monthly"}}, {"id": "si_b", "price": {"id": "price_topup_15"}}]}},
@@ -2279,6 +2277,18 @@ def test_change_plan_refuses_max_when_max_is_off_sale(monkeypatch):
         )
 
     assert excinfo.value.status_code == 400
+
+
+def test_change_plan_is_allowed_while_a_cancel_is_booked():
+    # Stripe's confirm page says the change renews the subscription (checked in test mode).
+    _paid_user("switch-cancel-booked")
+    fake_stripe = _switch_client(_switch_subscription(cancel_at_period_end=True))
+
+    create_plan_change_session(
+        "switch-cancel-booked", "max_early_monthly", config=get_billing_config(), stripe_client=fake_stripe
+    )
+
+    assert len(fake_stripe.created_portal_sessions) == 1
 
 
 def test_change_plan_switches_interval_on_the_same_plan():
