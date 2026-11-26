@@ -15,6 +15,7 @@ export type {
 export {
   formatPlanBadge,
   formatPlanName,
+  getPlanChangeKind,
   INCLUDED_IN_EVERY_PLAN_FEATURES,
   isBillingPlanKey,
   isCurrentPlanCard,

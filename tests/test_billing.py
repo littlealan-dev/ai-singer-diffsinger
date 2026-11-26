@@ -1,7 +1,9 @@
+import dataclasses
 from datetime import datetime, timedelta, timezone
 import warnings
 
 import pytest
+import stripe
 from google.cloud import firestore
 
 import src.backend.billing_topup as billing_topup_module
@@ -9,6 +11,11 @@ from src.backend.billing_checkout import create_checkout_session, create_embedde
 from src.backend.billing_checkout_sync import sync_checkout_session
 from src.backend.billing_config import get_billing_config, get_stripe_client
 from src.backend.billing_migration import ensure_billing_state_for_login
+from src.backend.billing_plan_change import (
+    cancel_scheduled_change,
+    create_plan_change_session,
+    scheduled_change_from_schedule,
+)
 from src.backend.billing_plans import is_selectable_paid_plan
 from src.backend.billing_types import BillingHttpError
 from src.backend.billing_portal import create_portal_session
@@ -73,6 +80,8 @@ class _FakeStripeClient:
         self.subscription_payload = None
         self.subscription_list_payload = []
         self.line_items_payload = {"data": []}
+        self.schedule_payload = None
+        self.released_schedules = []
         self.v1 = type("V1Api", (), {})()
         self.v1.customers = type("CustomersApi", (), {})()
         self.v1.checkout = type("CheckoutApi", (), {})()
@@ -80,6 +89,9 @@ class _FakeStripeClient:
         self.v1.billing_portal = type("PortalApi", (), {})()
         self.v1.billing_portal.sessions = type("PortalSessionsApi", (), {})()
         self.v1.subscriptions = type("SubscriptionsApi", (), {})()
+        self.v1.subscription_schedules = type("SubscriptionSchedulesApi", (), {})()
+        self.v1.subscription_schedules.retrieve = self._retrieve_schedule
+        self.v1.subscription_schedules.release = self._release_schedule
         self.v1.customers.create = self._create_customer
         self.v1.checkout.sessions.create = self._create_checkout_session
         self.v1.checkout.sessions.retrieve = self._retrieve_checkout_session
@@ -120,6 +132,14 @@ class _FakeStripeClient:
 
     def _list_subscriptions(self, *, params=None):
         return {"data": self.subscription_list_payload}
+
+    def _retrieve_schedule(self, schedule_id, *, params=None):
+        assert schedule_id
+        return self.schedule_payload
+
+    def _release_schedule(self, schedule_id, *, params=None):
+        self.released_schedules.append(schedule_id)
+        return {"id": schedule_id, "status": "released"}
 
     def create(self, **kwargs):
         if "params" in kwargs and "line_items" in kwargs["params"]:
@@ -2102,3 +2122,389 @@ def test_annual_invoice_paid_sets_paid_anchor_and_next_refresh():
     assert user["billing"]["creditRefreshAnchor"] == paid_at
     assert user["billing"]["nextCreditRefreshAt"] == compute_next_monthly_refresh(paid_at, paid_at)
     assert user["credits"]["balance"] == 30
+
+
+# --- Plan switching (docs/specs/plan-switching-spec.md) ---
+
+_T0 = datetime(2026, 12, 1, 12, 0, tzinfo=timezone.utc)
+_MID_MONTH = datetime(2026, 12, 15, 12, 0, tzinfo=timezone.utc)
+
+
+def _ts(value: datetime) -> int:
+    return int(value.timestamp())
+
+
+def _paid_user(uid: str, *, plan_key: str = "choir_early_monthly", customer_id: str = "cus_switch_123"):
+    get_or_create_credits(uid, f"{uid}@example.com")
+    get_firestore_client().collection("users").document(uid).set(
+        {
+            "billing": {
+                "stripeCustomerId": customer_id,
+                "stripeSubscriptionId": "sub_switch_123",
+                "activePlanKey": plan_key,
+                "stripeSubscriptionStatus": "active",
+                "creditRefreshAnchor": _T0,
+            }
+        },
+        merge=True,
+    )
+
+
+def _switch_subscription(price_id: str = "price_choir_early_monthly", **overrides):
+    subscription = {
+        "id": "sub_switch_123",
+        "customer": "cus_switch_123",
+        "status": "active",
+        "created": _ts(_T0),
+        "billing_cycle_anchor": _ts(_T0),
+        "current_period_start": _ts(_T0),
+        "current_period_end": _ts(datetime(2027, 1, 1, 12, 0, tzinfo=timezone.utc)),
+        "cancel_at_period_end": False,
+        "cancel_at": None,
+        "schedule": None,
+        "items": {"data": [{"id": "si_switch_123", "price": {"id": price_id}}]},
+    }
+    subscription.update(overrides)
+    return subscription
+
+
+def _switch_client(subscription=None):
+    fake_stripe = _FakeStripeClient()
+    fake_stripe.subscription_list_payload = [subscription or _switch_subscription()]
+    return fake_stripe
+
+
+def _invoice_line(price_id: str, amount: int, *, proration: bool) -> dict:
+    """An invoice line as API versions since basil send it (checked on 2026-11-18.endive)."""
+    return {
+        "amount": amount,
+        "pricing": {"price_details": {"price": price_id}},
+        "parent": {"type": "subscription_item_details", "subscription_item_details": {"proration": proration}},
+    }
+
+
+def _upgrade_invoice_event(event_id: str, uid: str, lines: list[dict], paid_at: datetime) -> dict:
+    return {
+        "id": event_id,
+        "type": "invoice.paid",
+        "data": {
+            "object": {
+                "id": f"in_{event_id}",
+                "customer": "cus_switch_123",
+                "metadata": {"firebaseUserId": uid},
+                "billing_reason": "subscription_update",
+                "lines": {"data": lines},
+                "status": "paid",
+                "status_transitions": {"paid_at": _ts(paid_at)},
+            }
+        },
+    }
+
+
+def test_change_plan_opens_the_portal_confirm_page_for_the_target_price():
+    _paid_user("switch-user")
+    fake_stripe = _switch_client()
+
+    url = create_plan_change_session(
+        "switch-user", "max_early_monthly", config=get_billing_config(), stripe_client=fake_stripe
+    )
+
+    assert url == "https://billing.stripe.test/session"
+    params = fake_stripe.created_portal_sessions[-1]
+    assert params["customer"] == "cus_switch_123"
+    assert params["configuration"] == "bpc_test_123"
+    assert params["return_url"] == "https://app.test/account"
+    assert params["flow_data"] == {
+        "type": "subscription_update_confirm",
+        "subscription_update_confirm": {
+            "subscription": "sub_switch_123",
+            "items": [{"id": "si_switch_123", "price": "price_max_early_monthly", "quantity": 1}],
+        },
+        "after_completion": {
+            "type": "redirect",
+            "redirect": {"return_url": "https://app.test/account?change=done"},
+        },
+    }
+
+
+def test_change_plan_keeps_the_return_url_query():
+    _paid_user("switch-user-query")
+    fake_stripe = _switch_client()
+    config = dataclasses.replace(get_billing_config(), portal_return_url="https://app.test/app?billing=sync")
+
+    create_plan_change_session("switch-user-query", "choir_early_annual", config=config, stripe_client=fake_stripe)
+
+    redirect = fake_stripe.created_portal_sessions[-1]["flow_data"]["after_completion"]["redirect"]
+    assert redirect["return_url"] == "https://app.test/app?billing=sync&change=done"
+
+
+@pytest.mark.parametrize(
+    "subscription_overrides,plan_key,status_code",
+    [
+        ({"status": "past_due"}, "max_early_monthly", 409),
+        ({"cancel_at_period_end": True}, "max_early_monthly", 409),
+        ({"cancel_at": _ts(datetime(2027, 1, 1, tzinfo=timezone.utc))}, "max_early_monthly", 409),
+        ({"schedule": "sub_sched_123"}, "max_early_monthly", 409),
+        (
+            {"items": {"data": [{"id": "si_a", "price": {"id": "price_choir_early_monthly"}}, {"id": "si_b", "price": {"id": "price_topup_15"}}]}},
+            "max_early_monthly",
+            409,
+        ),
+        ({}, "choir_early_monthly", 400),
+        # The founding Pro price is on sale, so the regular Pro price isn't a card.
+        ({}, "choir_monthly", 400),
+        ({}, "free", 400),
+        ({}, "not_a_plan", 400),
+    ],
+)
+def test_change_plan_refuses(subscription_overrides, plan_key, status_code):
+    _paid_user("switch-refused")
+    fake_stripe = _switch_client(_switch_subscription(**subscription_overrides))
+
+    with pytest.raises(BillingHttpError) as excinfo:
+        create_plan_change_session("switch-refused", plan_key, config=get_billing_config(), stripe_client=fake_stripe)
+
+    assert excinfo.value.status_code == status_code
+    assert fake_stripe.created_portal_sessions == []
+
+
+def test_change_plan_refuses_max_when_max_is_off_sale(monkeypatch):
+    monkeypatch.setenv("MAX_EARLY_SUPPORTER_ENABLED", "false")
+    get_billing_config.cache_clear()
+    _paid_user("switch-max-off")
+
+    with pytest.raises(BillingHttpError) as excinfo:
+        create_plan_change_session(
+            "switch-max-off", "max_early_annual", config=get_billing_config(), stripe_client=_switch_client()
+        )
+
+    assert excinfo.value.status_code == 400
+
+
+def test_change_plan_switches_interval_on_the_same_plan():
+    _paid_user("switch-interval")
+    fake_stripe = _switch_client()
+
+    create_plan_change_session("switch-interval", "choir_early_annual", config=get_billing_config(), stripe_client=fake_stripe)
+
+    items = fake_stripe.created_portal_sessions[-1]["flow_data"]["subscription_update_confirm"]["items"]
+    assert items == [{"id": "si_switch_123", "price": "price_choir_early_annual", "quantity": 1}]
+
+
+def test_change_plan_reports_a_price_the_portal_does_not_list():
+    _paid_user("switch-unlisted")
+    fake_stripe = _switch_client()
+
+    def refuse(*, params):
+        raise stripe.InvalidRequestError("does not include the price", param="flow_data")
+
+    fake_stripe.v1.billing_portal.sessions.create = refuse
+
+    with pytest.raises(BillingHttpError) as excinfo:
+        create_plan_change_session("switch-unlisted", "max_early_monthly", config=get_billing_config(), stripe_client=fake_stripe)
+
+    assert excinfo.value.status_code == 409
+
+
+def test_change_plan_needs_a_stripe_customer():
+    ensure_billing_state_for_login("switch-no-customer", "nocustomer@example.com")
+
+    with pytest.raises(BillingHttpError) as excinfo:
+        create_plan_change_session(
+            "switch-no-customer", "max_early_monthly", config=get_billing_config(), stripe_client=_switch_client()
+        )
+
+    assert excinfo.value.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        # billing_cycle_anchor=now: a credit for the old plan, then a full new period.
+        [
+            _invoice_line("price_solo_monthly", -350, proration=True),
+            _invoice_line("price_choir_early_monthly", 1999, proration=False),
+        ],
+        # The period carries on: a credit for the old plan and a charge for the rest of it.
+        [
+            _invoice_line("price_solo_monthly", -350, proration=True),
+            _invoice_line("price_choir_early_monthly", 1000, proration=True),
+        ],
+        # Older API versions put the flag on the line itself.
+        [
+            {"amount": -350, "price": {"id": "price_solo_monthly"}, "proration": True},
+            {"amount": 1999, "price": {"id": "price_choir_early_monthly"}, "proration": False},
+        ],
+    ],
+)
+def test_upgrade_invoice_grants_the_new_plan_not_the_credit_line(lines):
+    uid = "switch-upgrade-invoice"
+    _paid_user(uid, plan_key="solo_monthly")
+
+    handle_event(_upgrade_invoice_event("evt_upgrade_lines", uid, lines, _MID_MONTH))
+
+    user = get_firestore_client().collection("users").document(uid).get().to_dict() or {}
+    assert user["billing"]["activePlanKey"] == "choir_early_monthly"
+    assert user["credits"]["balance"] == 120
+    assert user["credits"]["monthlyAllowance"] == 120
+
+
+def _upgrade_subscription_event(event_id: str, uid: str) -> dict:
+    subscription = _switch_subscription(
+        "price_choir_early_monthly",
+        billing_cycle_anchor=_ts(_MID_MONTH),
+        current_period_start=_ts(_MID_MONTH),
+        current_period_end=_ts(datetime(2027, 1, 15, 12, 0, tzinfo=timezone.utc)),
+    )
+    subscription["metadata"] = {"firebaseUserId": uid}
+    return {"id": event_id, "type": "customer.subscription.updated", "data": {"object": subscription}}
+
+
+@pytest.mark.parametrize("invoice_first", [True, False])
+def test_upgrade_ends_with_a_new_anchor_whichever_webhook_comes_first(monkeypatch, invoice_first):
+    uid = f"switch-order-{invoice_first}"
+    _paid_user(uid, plan_key="solo_monthly")
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _MID_MONTH if tz is not None else _MID_MONTH.replace(tzinfo=None)
+
+    monkeypatch.setattr("src.backend.billing_store.datetime", FrozenDateTime)
+    invoice = _upgrade_invoice_event(
+        f"evt_order_invoice_{invoice_first}",
+        uid,
+        [
+            _invoice_line("price_solo_monthly", -350, proration=True),
+            _invoice_line("price_choir_early_monthly", 1999, proration=False),
+        ],
+        _MID_MONTH,
+    )
+    subscription = _upgrade_subscription_event(f"evt_order_sub_{invoice_first}", uid)
+    for event in ([invoice, subscription] if invoice_first else [subscription, invoice]):
+        handle_event(event)
+
+    user = get_firestore_client().collection("users").document(uid).get().to_dict() or {}
+    assert user["billing"]["activePlanKey"] == "choir_early_monthly"
+    assert user["billing"]["creditRefreshAnchor"] == _MID_MONTH
+    assert user["billing"]["nextCreditRefreshAt"] == datetime(2027, 1, 15, 12, 0, tzinfo=timezone.utc)
+    assert user["credits"]["balance"] == 120
+
+
+def _downgrade_schedule(
+    status: str = "active",
+    schedule_id: str = "sub_sched_123",
+    *,
+    started_at: datetime = _T0,
+    change_at: datetime = datetime(2027, 1, 1, 12, 0, tzinfo=timezone.utc),
+) -> dict:
+    return {
+        "id": schedule_id,
+        "object": "subscription_schedule",
+        "customer": "cus_switch_123",
+        "subscription": "sub_switch_123",
+        "status": status,
+        "phases": [
+            {
+                "start_date": _ts(started_at),
+                "end_date": _ts(change_at),
+                "items": [{"price": "price_max_early_monthly", "quantity": 1}],
+            },
+            {
+                "start_date": _ts(change_at),
+                "end_date": _ts(change_at + timedelta(days=31)),
+                "items": [{"price": "price_choir_early_monthly", "quantity": 1}],
+            },
+        ],
+    }
+
+
+def test_scheduled_change_is_the_next_phase_with_a_different_price():
+    change = scheduled_change_from_schedule(_downgrade_schedule(), get_billing_config(), now=_MID_MONTH)
+
+    assert change == {
+        "planKey": "choir_early_monthly",
+        "at": datetime(2027, 1, 1, 12, 0, tzinfo=timezone.utc),
+        "scheduleId": "sub_sched_123",
+    }
+
+
+@pytest.mark.parametrize("status", ["released", "canceled", "completed"])
+def test_ended_schedule_books_nothing(status):
+    assert scheduled_change_from_schedule(_downgrade_schedule(status), get_billing_config(), now=_MID_MONTH) is None
+
+
+def test_schedule_past_its_change_books_nothing():
+    after_change = datetime(2027, 1, 2, tzinfo=timezone.utc)
+    assert scheduled_change_from_schedule(_downgrade_schedule(), get_billing_config(), now=after_change) is None
+
+
+def _live_schedule(status: str = "active", schedule_id: str = "sub_sched_123") -> dict:
+    """A booked downgrade around the real clock, for code that reads datetime.now."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    return _downgrade_schedule(
+        status, schedule_id, started_at=now - timedelta(days=10), change_at=now + timedelta(days=20)
+    )
+
+
+def _schedule_event(event_id: str, event_type: str, schedule: dict) -> dict:
+    return {"id": event_id, "type": event_type, "data": {"object": schedule}}
+
+
+def _stored_change(uid: str):
+    user = get_firestore_client().collection("users").document(uid).get().to_dict() or {}
+    return (user.get("billing") or {}).get("scheduledChange")
+
+
+def test_schedule_webhooks_store_and_clear_the_booked_change():
+    uid = "switch-schedule-events"
+    _paid_user(uid, plan_key="max_early_monthly")
+
+    handle_event(_schedule_event("evt_sched_created", "subscription_schedule.created", _live_schedule()))
+    assert _stored_change(uid)["planKey"] == "choir_early_monthly"
+
+    handle_event(_schedule_event("evt_sched_released", "subscription_schedule.released", _live_schedule("released")))
+    assert _stored_change(uid) is None
+
+
+def test_an_older_schedule_ending_leaves_the_newer_booking():
+    uid = "switch-schedule-order"
+    _paid_user(uid, plan_key="max_early_monthly")
+
+    handle_event(_schedule_event("evt_sched_new", "subscription_schedule.created", _live_schedule(schedule_id="sub_sched_new")))
+    handle_event(
+        _schedule_event(
+            "evt_sched_old_released",
+            "subscription_schedule.released",
+            _live_schedule("released", schedule_id="sub_sched_old"),
+        )
+    )
+
+    assert _stored_change(uid)["scheduleId"] == "sub_sched_new"
+
+
+def test_undo_releases_the_schedule_and_clears_the_booking():
+    uid = "switch-undo"
+    _paid_user(uid, plan_key="max_early_monthly")
+    handle_event(_schedule_event("evt_sched_undo", "subscription_schedule.created", _live_schedule()))
+    fake_stripe = _switch_client(_switch_subscription("price_max_early_monthly", schedule="sub_sched_123"))
+
+    result = cancel_scheduled_change(uid, config=get_billing_config(), stripe_client=fake_stripe)
+
+    assert result == {"released": True}
+    assert fake_stripe.released_schedules == ["sub_sched_123"]
+    assert _stored_change(uid) is None
+
+
+def test_subscription_sync_stores_and_clears_the_booked_change():
+    uid = "switch-sync"
+    _paid_user(uid, plan_key="max_early_monthly")
+    fake_stripe = _switch_client(_switch_subscription("price_max_early_monthly", schedule="sub_sched_123"))
+    fake_stripe.schedule_payload = _live_schedule()
+
+    sync_current_subscription(uid, config=get_billing_config(), stripe_client=fake_stripe)
+    assert _stored_change(uid)["planKey"] == "choir_early_monthly"
+
+    fake_stripe.subscription_list_payload = [_switch_subscription("price_max_early_monthly")]
+    sync_current_subscription(uid, config=get_billing_config(), stripe_client=fake_stripe)
+    assert _stored_change(uid) is None

@@ -950,6 +950,18 @@ export async function createPortalSession(): Promise<BillingPortalResponse> {
   return request("/billing/portal-session", { method: "POST" });
 }
 
+export async function createPlanChangeSession(planKey: string): Promise<BillingPortalResponse> {
+  return request("/billing/change-plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ planKey }),
+  });
+}
+
+export async function cancelScheduledPlanChange(): Promise<{ released: boolean }> {
+  return request("/billing/scheduled-change/cancel", { method: "POST" });
+}
+
 export async function subscribeToWaitlist(
   payload: WaitlistSubscribeRequest
 ): Promise<WaitlistSubscribeResponse> {

@@ -17,6 +17,12 @@ export type BillingTopupPack = {
   expiresAt: Date | null;
 };
 
+/** A plan change the Stripe portal booked for the renewal date. */
+export type ScheduledPlanChange = {
+  planKey: BillingPlanKey;
+  at: Date;
+};
+
 export type BillingState = {
   activePlanKey: BillingPlanKey;
   family: PlanFamily;
@@ -27,11 +33,14 @@ export type BillingState = {
   latestPaymentIntentStatus: string | null;
   latestPaymentFailureCode: string | null;
   latestPaymentFailureMessage: string | null;
+  latestInvoicePaymentFailedAt: Date | null;
   stripeCustomerId: string | null;
   cancelAtPeriodEnd: boolean;
   currentPeriodEnd: Date | null;
   nextCreditRefreshAt: Date | null;
+  scheduledChange: ScheduledPlanChange | null;
   monthlyAllowance: number;
+  lastGrantAt: Date | null;
   availableCredits: number;
   reservedCredits: number;
   subscriptionCredits: number;
@@ -55,11 +64,14 @@ const DEFAULT_STATE: Omit<BillingState, "loading" | "error"> = {
   latestPaymentIntentStatus: null,
   latestPaymentFailureCode: null,
   latestPaymentFailureMessage: null,
+  latestInvoicePaymentFailedAt: null,
   stripeCustomerId: null,
   cancelAtPeriodEnd: false,
   currentPeriodEnd: null,
   nextCreditRefreshAt: null,
+  scheduledChange: null,
   monthlyAllowance: 8,
+  lastGrantAt: null,
   availableCredits: 0,
   reservedCredits: 0,
   subscriptionCredits: 0,
@@ -128,11 +140,14 @@ export function useBillingState(): BillingState {
           latestPaymentIntentStatus: billing.latestPaymentIntentStatus || null,
           latestPaymentFailureCode: billing.latestPaymentFailureCode || null,
           latestPaymentFailureMessage: billing.latestPaymentFailureMessage || null,
+          latestInvoicePaymentFailedAt: toDate(billing.latestInvoicePaymentFailedAt),
           stripeCustomerId: billing.stripeCustomerId || null,
           cancelAtPeriodEnd: Boolean(billing.cancelAtPeriodEnd),
           currentPeriodEnd: toDate(billing.currentPeriodEnd),
           nextCreditRefreshAt: toDate(billing.nextCreditRefreshAt),
+          scheduledChange: toScheduledChange(billing.scheduledChange),
           monthlyAllowance: finiteNumber(credits.monthlyAllowance) ?? 0,
+          lastGrantAt: toDate(credits.lastGrantAt),
           availableCredits: balance - reserved + topupAvailable,
           reservedCredits: reserved,
           subscriptionCredits: balance - reserved,
@@ -195,6 +210,15 @@ export function useBillingState(): BillingState {
   }, [user]);
 
   return state;
+}
+
+function toScheduledChange(value: unknown): ScheduledPlanChange | null {
+  const change = objectValue(value);
+  const at = toDate(change?.at);
+  if (!change || !at || !isBillingPlanKey(String(change.planKey))) return null;
+  // Once its date has passed, the change has happened: the webhooks clear it shortly after.
+  if (at.getTime() <= Date.now()) return null;
+  return { planKey: change.planKey as BillingPlanKey, at };
 }
 
 function normalizeFamily(value: unknown): PlanFamily {

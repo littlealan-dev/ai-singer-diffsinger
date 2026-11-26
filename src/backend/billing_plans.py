@@ -120,6 +120,20 @@ def is_selectable_paid_plan(plan_key: PlanKey, config: BillingConfig) -> bool:
     return True
 
 
+def is_on_sale_plan(plan_key: PlanKey, config: BillingConfig) -> bool:
+    """Whether a plan card shows this plan, so a subscriber may switch to it.
+
+    Checkout also takes the regular Pro prices while the founding Pro price is on sale; a plan
+    switch goes only to the price the card shows.
+    """
+    if not is_selectable_paid_plan(plan_key, config):
+        return False
+    plan = get_plan(plan_key, config)
+    if plan.family == "choir" and not plan.is_early_supporter:
+        return not config.choir_early_supporter_enabled
+    return True
+
+
 def get_plan_for_price_id(price_id: str, config: BillingConfig) -> PlanDefinition | None:
     for plan in get_plan_catalog(config).values():
         if plan.stripe_price_id == price_id:

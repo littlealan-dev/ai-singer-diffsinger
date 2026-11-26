@@ -3,16 +3,22 @@ import clsx from "clsx";
 import { Check, Loader2, X } from "lucide-react";
 import {
   cancelTopupCheckoutSession,
+  clearPendingPlanChange,
+  getPendingPlanChange,
   startBillingPortal,
   startEmbeddedPlanCheckout,
   startEmbeddedTopupCheckout,
+  startPlanChange,
   syncCheckoutSession,
   syncTopupCheckoutSession,
+  undoScheduledPlanChange,
 } from "../../billing/api";
 import type { EmbeddedCheckoutResponse } from "../../api";
 import { initEmbeddedStripeCheckout } from "../../billing/embeddedStripe";
 import {
+  formatPlanBadge,
   getDisplayPlans,
+  getPlanChangeKind,
   INCLUDED_IN_EVERY_PLAN_FEATURES,
   isCurrentPlanCard,
   isPaidPlanKey,
@@ -36,6 +42,8 @@ export type PaywallTrigger =
   | "credits_pill"
   | "billing_menu"
   | "checkout_sync"
+  // Back from the Stripe portal's plan change page: a status panel until the change shows.
+  | "plan_change_return"
   // The Sing All quote card's Top up and Upgrade: the same paywall as insufficient_credits and
   // billing_menu, named so the billing events say the purchase started from Sing All.
   | "sing_all_topup"
@@ -51,6 +59,9 @@ type BillingPaywallModalProps = {
 };
 
 const paidStatuses = new Set(["active", "trialing", "past_due"]);
+// Stripe changes a plan only while the subscription is paid up (see the backend's change-plan).
+const changeableStatuses = new Set(["active", "trialing"]);
+const PLAN_CHANGE_RETURN_TIMEOUT_MS = 30000;
 const STRIPE_PUBLISHABLE_KEY = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY?.trim() || "";
 
 type CheckoutViewState = "plans" | "creating_checkout" | "embedded_checkout" | "confirming" | "failed";
@@ -328,6 +339,36 @@ export function BillingPaywallModal({
     }
   };
 
+  const handlePlanChange = async (planKey: BillingPlanKey) => {
+    setBusyAction(planKey);
+    setError(null);
+    try {
+      logAnalyticsEvent("billing_plan_change_start", {
+        from_plan_key: billing.activePlanKey,
+        plan_key: planKey,
+        trigger,
+      });
+      const url = await startPlanChange(planKey);
+      window.location.assign(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not open the plan change.");
+      setBusyAction(null);
+    }
+  };
+
+  const handleUndoScheduledChange = async () => {
+    setBusyAction("undo_scheduled_change");
+    setError(null);
+    try {
+      await undoScheduledPlanChange();
+      logAnalyticsEvent("billing_plan_change_undo", { plan_key: billing.scheduledChange?.planKey });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not undo the plan change.");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const handleTopupCheckout = async () => {
     setBusyAction("topup");
     setError(null);
@@ -405,6 +446,23 @@ export function BillingPaywallModal({
           {billing.cancelAtPeriodEnd ? (
             <div className="billing-status-note">Cancels at period end.</div>
           ) : null}
+          {billing.scheduledChange ? (
+            <div className="billing-status-note">
+              <span>
+                Changes to {planLabel(billing.scheduledChange.planKey)} on{" "}
+                {formatDate(billing.scheduledChange.at)}.
+              </span>
+              <button
+                type="button"
+                onClick={handleUndoScheduledChange}
+                disabled={busyAction === "undo_scheduled_change"}
+              >
+                {busyAction === "undo_scheduled_change"
+                  ? "Undoing..."
+                  : `Keep ${planLabel(billing.activePlanKey)}`}
+              </button>
+            </div>
+          ) : null}
           {billing.error ? (
             <div className="billing-status-warning" role="alert">
               {billing.error} Pricing is still visible, but checkout is paused until billing loads.
@@ -429,7 +487,9 @@ export function BillingPaywallModal({
           )}
         </header>
 
-        {checkoutView === "creating_checkout" || checkoutView === "embedded_checkout" || checkoutView === "confirming" ? (
+        {trigger === "plan_change_return" ? (
+          <PlanChangeReturnPanel billing={billing} onDone={onConfirmed ?? (() => onClose())} />
+        ) : checkoutView === "creating_checkout" || checkoutView === "embedded_checkout" || checkoutView === "confirming" ? (
           <EmbeddedCheckoutPanel
             view={checkoutView}
             checkout={activeEmbeddedCheckout}
@@ -478,6 +538,7 @@ export function BillingPaywallModal({
                   checkoutDisabled={billing.loading || Boolean(billing.error)}
                   onCheckout={handleCheckout}
                   onPortal={handlePortal}
+                  onChangePlan={handlePlanChange}
                 />
               ))}
               <TopupPlanCard
@@ -507,6 +568,9 @@ export function BillingPaywallModal({
                   {busyAction === "portal" ? "Opening Billing..." : "Manage Billing"}
                 </button>
               ) : null}
+              {billing.scheduledChange ? (
+                <span>To cancel instead, keep your plan first, then cancel in Manage Billing.</span>
+              ) : null}
               <a href="/legal/terms" target="_blank" rel="noopener noreferrer">
                 Terms
               </a>
@@ -529,6 +593,7 @@ type PlanCardProps = {
   checkoutDisabled: boolean;
   onCheckout: (planKey: BillingPlanKey) => void;
   onPortal: () => void;
+  onChangePlan: (planKey: BillingPlanKey) => void;
 };
 
 function PlanCard({
@@ -539,8 +604,11 @@ function PlanCard({
   checkoutDisabled,
   onCheckout,
   onPortal,
+  onChangePlan,
 }: PlanCardProps) {
-  const current = isCurrentPlanCard(billing.activePlanKey, plan);
+  // A paid user's cards are plan changes: "current" means the same plan and billing interval.
+  const changeKind = activePaid ? getPlanChangeKind(billing.activePlanKey, plan.planKey) : null;
+  const current = changeKind ? changeKind === "current" : isCurrentPlanCard(billing.activePlanKey, plan);
   const isPaidCard = plan.cardKey !== "free";
   const busy = busyAction === plan.planKey || (busyAction === "portal" && activePaid && isPaidCard && !current);
 
@@ -583,6 +651,15 @@ function PlanCard({
       <div className="billing-plan-action">
         {current ? (
           <span className="billing-current-plan">Current Plan</span>
+        ) : changeKind && changeKind !== "current" ? (
+          <PlanChangeAction
+            plan={plan}
+            billing={billing}
+            kind={changeKind}
+            busy={busyAction === plan.planKey}
+            disabled={checkoutDisabled || busyAction !== null}
+            onChangePlan={onChangePlan}
+          />
         ) : activePaid && isPaidCard ? (
           <button type="button" className="billing-plan-button secondary" onClick={onPortal} disabled={busy}>
             {busy ? "Opening Billing..." : "Manage Billing"}
@@ -602,6 +679,108 @@ function PlanCard({
       </div>
     </article>
   );
+}
+
+type PlanChangeActionProps = {
+  plan: DisplayPlan;
+  billing: BillingState;
+  kind: Exclude<NonNullable<ReturnType<typeof getPlanChangeKind>>, "current">;
+  busy: boolean;
+  disabled: boolean;
+  onChangePlan: (planKey: BillingPlanKey) => void;
+};
+
+function PlanChangeAction({ plan, billing, kind, busy, disabled, onChangePlan }: PlanChangeActionProps) {
+  const label =
+    kind === "upgrade"
+      ? `Upgrade to ${plan.name}`
+      : kind === "switch_interval"
+        ? `Switch to ${plan.planKey.endsWith("_annual") ? "annual" : "monthly"}`
+        : `Switch to ${plan.name}`;
+  const renewal = billing.currentPeriodEnd ? formatDate(billing.currentPeriodEnd) : "your renewal date";
+  const blockedNote = !changeableStatuses.has(billing.stripeSubscriptionStatus || "")
+    ? "Fix your payment in Manage Billing to change plan"
+    : billing.cancelAtPeriodEnd
+      ? "Renew in Manage Billing to change plan"
+      : billing.scheduledChange
+        ? "Keep your plan above to choose another change"
+        : null;
+  const note = blockedNote ?? (kind === "upgrade" ? "Pay the difference today" : `From ${renewal}`);
+  return (
+    <div className="billing-plan-change">
+      <button
+        type="button"
+        className="billing-plan-button"
+        onClick={() => onChangePlan(plan.planKey)}
+        disabled={disabled || busy || blockedNote !== null}
+      >
+        {busy ? "Opening Billing..." : label}
+      </button>
+      <span className="billing-plan-change-note">{note}</span>
+    </div>
+  );
+}
+
+type PlanChangeReturnPanelProps = {
+  billing: BillingState;
+  onDone: (message: string) => void;
+};
+
+/** After the Stripe portal: wait for the change to show on the billing doc, then close. */
+function PlanChangeReturnPanel({ billing, onDone }: PlanChangeReturnPanelProps) {
+  const [pending] = useState(getPendingPlanChange);
+  const doneRef = useRef(false);
+
+  const finish = useCallback(
+    (message: string) => {
+      if (doneRef.current) return;
+      doneRef.current = true;
+      clearPendingPlanChange();
+      onDone(message);
+    },
+    [onDone]
+  );
+
+  useEffect(() => {
+    if (!pending) {
+      finish("Your billing is up to date.");
+      return;
+    }
+    const name = planLabel(pending.planKey);
+    const startedAt = pending.startedAt;
+    if (billing.activePlanKey === pending.planKey && (billing.lastGrantAt?.getTime() ?? 0) >= startedAt) {
+      finish(`You're on ${name}: ${billing.monthlyAllowance} credits.`);
+    } else if (billing.scheduledChange?.planKey === pending.planKey) {
+      finish(`Your plan changes to ${name} on ${formatDate(billing.scheduledChange.at)}.`);
+    } else if ((billing.latestInvoicePaymentFailedAt?.getTime() ?? 0) >= startedAt) {
+      finish("Your payment didn't go through, so your plan hasn't changed. Check your card in Manage Billing.");
+    }
+  }, [billing, finish, pending]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => finish("Still confirming with Stripe. Your plan will update here shortly."),
+      PLAN_CHANGE_RETURN_TIMEOUT_MS
+    );
+    return () => window.clearTimeout(timer);
+  }, [finish]);
+
+  return (
+    <section className="billing-embedded-panel" aria-live="polite">
+      <Loader2 size={24} className="billing-spinner" />
+      <h3>Updating your plan...</h3>
+      <p>Stripe is confirming your change. This usually takes a few seconds.</p>
+    </section>
+  );
+}
+
+/** "Pro monthly", "Max annual": the card name the user knows, with its billing interval. */
+function planLabel(planKey: BillingPlanKey): string {
+  return `${formatPlanBadge(planKey)} ${planKey.endsWith("_annual") ? "annual" : "monthly"}`;
+}
+
+function formatDate(date: Date): string {
+  return date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
 }
 
 type TopupCardProps = {
@@ -800,6 +979,11 @@ function getTriggerCopy(trigger: PaywallTrigger, billing: BillingState): { title
       return {
         title: "Completing your upgrade",
         subtitle: "We are waiting for Stripe to sync your plan and monthly credits.",
+      };
+    case "plan_change_return":
+      return {
+        title: "Changing your plan",
+        subtitle: "Your plan and monthly credits update here once Stripe confirms.",
       };
     case "credits_pill":
       if (billing.activePlanKey !== "free") {

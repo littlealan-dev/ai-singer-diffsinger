@@ -225,6 +225,44 @@ export function isCurrentPlanCard(activePlanKey: BillingPlanKey | null | undefin
   );
 }
 
+/**
+ * What switching from the active plan to a card's plan does, as Stripe's portal decides it:
+ * a dearer plan per month applies now; a cheaper one, or the same plan on the other billing
+ * interval, waits for the renewal date.
+ */
+export type PlanChangeKind = "current" | "upgrade" | "switch_interval" | "downgrade";
+
+export function getPlanChangeKind(
+  activePlanKey: BillingPlanKey | null | undefined,
+  targetPlanKey: BillingPlanKey
+): PlanChangeKind | null {
+  const active = paidPlanPrice(activePlanKey);
+  const target = paidPlanPrice(targetPlanKey);
+  if (!active || !target) return null;
+  if (active.family === target.family) {
+    return active.interval === target.interval ? "current" : "switch_interval";
+  }
+  return target.monthlyEquivalentCents > active.monthlyEquivalentCents ? "upgrade" : "downgrade";
+}
+
+function paidPlanPrice(
+  planKey: BillingPlanKey | null | undefined
+): { family: PlanFamily; interval: BillingInterval; monthlyEquivalentCents: number } | null {
+  for (const choirEarlySupporterEnabled of [true, false]) {
+    for (const plan of BASE_PLANS) {
+      const price = plan.cardKey === "choir" ? getChoirPrice(choirEarlySupporterEnabled) : plan.price;
+      if (!price) continue;
+      if (price.monthlyPlanKey === planKey) {
+        return { family: plan.family, interval: "monthly", monthlyEquivalentCents: price.monthlyCents };
+      }
+      if (price.annualPlanKey === planKey) {
+        return { family: plan.family, interval: "annual", monthlyEquivalentCents: price.annualCents / 12 };
+      }
+    }
+  }
+  return null;
+}
+
 export function formatPlanName(planKey: BillingPlanKey | null | undefined): string {
   switch (planKey) {
     case "solo_monthly":

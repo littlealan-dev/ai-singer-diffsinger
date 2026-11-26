@@ -51,6 +51,8 @@ class BillingState(TypedDict, total=False):
     nextCreditRefreshAt: datetime | None
     creditRefreshAnchor: datetime | None
     freeTierActivatedAt: datetime | None
+    # A plan change the portal booked for the renewal date: {planKey, at, scheduleId}.
+    scheduledChange: dict[str, Any] | None
 
 
 class CreditsState(TypedDict, total=False):

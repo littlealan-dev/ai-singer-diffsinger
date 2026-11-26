@@ -57,6 +57,9 @@ def sync_current_subscription(
         is_early_supporter=get_plan(plan_key, billing_config).is_early_supporter,
         billing_cycle_anchor=_timestamp_to_datetime(subscription.get("billing_cycle_anchor")),
     )
+    from src.backend.billing_plan_change import sync_scheduled_change
+
+    sync_scheduled_change(uid, subscription, client, billing_config)
     return {"synced": True, "status": status, "activePlanKey": plan_key}
 
 

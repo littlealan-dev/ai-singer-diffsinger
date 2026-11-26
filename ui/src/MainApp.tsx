@@ -114,6 +114,8 @@ import {
 } from "./components/billing/BillingPaywallModal";
 import {
   clearPendingBillingPortalSync,
+  clearPendingPlanChange,
+  getPendingPlanChange,
   hasPendingBillingPortalSync,
   startCheckout,
   startBillingPortal,
@@ -3898,6 +3900,8 @@ export default function MainApp() {
     const topupStatus = url.searchParams.get("topup");
     const sessionId = url.searchParams.get("session_id");
     const billingSync = url.searchParams.get("billing") === "sync";
+    // The portal adds change=done only after the user confirmed a plan change.
+    const planChangeDone = url.searchParams.get("change") === "done";
     const returnedFromTopup = topupStatus === "success" || topupStatus === "cancel";
     const returnedFromCheckout = !returnedFromTopup && (checkoutStatus === "success" || Boolean(sessionId));
     const returnedFromPortal = billingSync || hasPendingBillingPortalSync();
@@ -3908,6 +3912,7 @@ export default function MainApp() {
       url.searchParams.delete("topup");
       url.searchParams.delete("session_id");
       url.searchParams.delete("billing");
+      url.searchParams.delete("change");
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
     };
 
@@ -3929,6 +3934,11 @@ export default function MainApp() {
         cleanupReturnUrl();
         clearPendingCheckoutPlan();
         clearPendingBillingPortalSync();
+        if (returnedFromPortal && planChangeDone && getPendingPlanChange()) {
+          openPaywall("plan_change_return");
+          return;
+        }
+        clearPendingPlanChange();
         setPaywallTrigger(null);
         setPaywallDetail(null);
       })

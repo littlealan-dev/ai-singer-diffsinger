@@ -75,6 +75,8 @@ Early supporter:
 ## Business Rules
 
 ### Plan switching
+> **Superseded (2026-11-26):** self-serve upgrades, downgrades and monthly/annual switches are now specced in `plan-switching-spec.md`, through a Stripe Customer Portal deep link. The text below describes the original v1 launch scope.
+
 v1 does **not** support self-serve plan switching.
 
 Allowed in v1:

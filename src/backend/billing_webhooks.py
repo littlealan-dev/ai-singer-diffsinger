@@ -76,6 +76,8 @@ def handle_event(
         _handle_subscription_updated(payload, config=config)
     elif event_type == "customer.subscription.deleted":
         _handle_subscription_deleted(payload)
+    elif event_type.startswith("subscription_schedule."):
+        _handle_subscription_schedule_event(payload, config=config)
     elif event_type in {"charge.dispute.created", "charge.dispute.updated", "charge.dispute.closed"}:
         _handle_dispute_event(event_type, payload)
     elif event_type in {"refund.created", "refund.updated", "refund.failed", "charge.refunded"}:
@@ -129,11 +131,7 @@ def _handle_invoice_paid(payload: dict[str, Any], *, config: BillingConfig | Non
 
     invoice_id = str(payload["id"])
     line_items = ((payload.get("lines") or {}).get("data") or [])
-    price_id = None
-    for line in line_items:
-        price_id = _invoice_line_price_id(line)
-        if price_id:
-            break
+    price_id = _invoice_plan_price_id(line_items)
     if not price_id:
         logger.warning("invoice.paid missing recurring price id invoice=%s", invoice_id)
         return
@@ -211,6 +209,18 @@ def _handle_subscription_deleted(payload: dict[str, Any]) -> None:
     if not uid:
         raise BillingHttpError(409, "Unable to resolve Firebase user for deleted subscription.")
     _transition_subscription_to_free(uid, payload)
+
+
+def _handle_subscription_schedule_event(payload: dict[str, Any], *, config: BillingConfig | None = None) -> None:
+    # A schedule is how the portal books a plan change for the renewal date.
+    from src.backend.billing_plan_change import store_scheduled_change
+
+    customer_id = _customer_id_from_payload(payload)
+    uid = find_user_id_by_customer_id(customer_id) if customer_id else None
+    if not uid:
+        logger.warning("Unable to resolve Firebase user for subscription schedule id=%s", payload.get("id"))
+        return
+    store_scheduled_change(uid, payload, config=config)
 
 
 def _transition_subscription_to_free(uid: str, payload: dict[str, Any]) -> None:
@@ -374,6 +384,30 @@ def _apply_paid_invoice(
         )
 
     _transaction(db.transaction())
+
+
+def _invoice_plan_price_id(line_items: list[dict[str, Any]]) -> str | None:
+    """The price this invoice pays for from now on.
+
+    A plan change invoice opens with a credit for the unused time on the old plan. The plan
+    bought is the line that isn't a proration (a new period starts), or, when every line is a
+    proration (the period carries on), the line that charges.
+    """
+    priced = [(line, price_id) for line in line_items if (price_id := _invoice_line_price_id(line))]
+    for line, price_id in priced:
+        if not _invoice_line_is_proration(line):
+            return price_id
+    for line, price_id in priced:
+        if (line.get("amount") or 0) > 0:
+            return price_id
+    return priced[0][1] if priced else None
+
+
+def _invoice_line_is_proration(line: dict[str, Any]) -> bool:
+    if isinstance(line.get("proration"), bool):
+        return line["proration"]
+    details = (line.get("parent") or {}).get("subscription_item_details") or {}
+    return bool(details.get("proration"))
 
 
 def _invoice_line_price_id(line: dict[str, Any]) -> str | None:

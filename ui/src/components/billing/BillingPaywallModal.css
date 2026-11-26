@@ -405,6 +405,23 @@
   opacity: 0.68;
 }
 
+.billing-plan-change {
+  width: 100%;
+  display: grid;
+  gap: 6px;
+}
+
+.billing-plan-change-note {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+.billing-plan-action:has(.billing-plan-change) {
+  height: auto;
+  min-height: 48px;
+}
+
 .billing-current-plan {
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.06);
@@ -526,6 +543,7 @@
 .billing-modal-footer {
   margin-top: 20px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
   gap: 16px;

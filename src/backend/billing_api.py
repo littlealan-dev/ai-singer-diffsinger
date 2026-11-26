@@ -225,6 +225,32 @@ def create_billing_app() -> FastAPI:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         return {"url": url}
 
+    @app.post("/billing/change-plan")
+    async def create_billing_plan_change_session(
+        body: BillingCheckoutRequest,
+        request: Request,
+    ) -> Dict[str, str]:
+        user_id, _ = await _get_user_context_or_401(request)
+        from src.backend.billing_plan_change import create_plan_change_session
+        from src.backend.billing_types import BillingHttpError
+
+        try:
+            url = await asyncio.to_thread(create_plan_change_session, user_id, body.planKey)
+        except BillingHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        return {"url": url}
+
+    @app.post("/billing/scheduled-change/cancel")
+    async def cancel_billing_scheduled_change(request: Request) -> Dict[str, Any]:
+        user_id, _ = await _get_user_context_or_401(request)
+        from src.backend.billing_plan_change import cancel_scheduled_change
+        from src.backend.billing_types import BillingHttpError
+
+        try:
+            return await asyncio.to_thread(cancel_scheduled_change, user_id)
+        except BillingHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
     @app.post("/billing/subscription/sync")
     async def sync_billing_subscription(request: Request) -> Dict[str, Any]:
         user_id, _ = await _get_user_context_or_401(request)
