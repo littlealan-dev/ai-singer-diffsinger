@@ -7,11 +7,13 @@ export type BillingPlanKey =
   | "choir_early_monthly"
   | "choir_early_annual"
   | "choir_monthly"
-  | "choir_annual";
+  | "choir_annual"
+  | "max_early_monthly"
+  | "max_early_annual";
 
-export type PlanFamily = "free" | "solo" | "choir";
+export type PlanFamily = "free" | "solo" | "choir" | "max";
 
-export type PlanCardKey = "free" | "solo" | "choir";
+export type PlanCardKey = "free" | "solo" | "choir" | "max";
 
 type PaidPrice = {
   monthlyCents: number;
@@ -49,6 +51,8 @@ export type DisplayPlan = PlanBase & {
 
 type DisplayPlanOptions = {
   choirEarlySupporterEnabled?: boolean;
+  /** Max is sold only at its founding price: with the offer off, its card is not shown. */
+  maxEarlySupporterEnabled?: boolean;
 };
 
 export const INCLUDED_IN_EVERY_PLAN_FEATURES = [
@@ -76,7 +80,12 @@ const BASE_PLANS: PlanBase[] = [
     subtitle: "For independent singers and creators",
     monthlyCredits: 30,
     audioMinutes: 15,
-    features: ["Roughly 3-4 full songs per month", "Full commercial rights", "Access to all AI voices"],
+    features: [
+      "Roughly 3-4 full songs per month",
+      "Full commercial rights",
+      "Access to all AI voices",
+      "Sing All: every vocal part sung in one go",
+    ],
     badge: "Most Popular",
     price: {
       monthlyCents: 699,
@@ -93,11 +102,33 @@ const BASE_PLANS: PlanBase[] = [
     monthlyCredits: 120,
     audioMinutes: 60,
     features: [
+      "All features in Solo",
       "Enough for 3-4 full choir songs with all 4 SATB parts",
-      "Full commercial rights",
-      "Access to all AI voices",
+      "Or 1 demo pack: a 4-part song in lyrics and solfège, with full and part-dominant mixes",
     ],
     badge: "Founding Offer",
+  },
+  {
+    cardKey: "max",
+    family: "max",
+    name: "Max",
+    subtitle: "For busy choirs, teachers and studios",
+    monthlyCredits: 400,
+    audioMinutes: 200,
+    features: [
+      "All features in Solo",
+      "Enough for 10+ full choir songs with all 4 SATB parts",
+      "Or 5-6 demo packs: a 4-part song in lyrics and solfège, with full and part-dominant mixes",
+    ],
+    badge: "Founding Offer",
+    price: {
+      monthlyCents: 3999,
+      annualCents: 39900,
+      monthlyPlanKey: "max_early_monthly",
+      annualPlanKey: "max_early_annual",
+      originalMonthlyCents: 4999,
+      originalAnnualCents: 49900,
+    },
   },
 ];
 
@@ -108,6 +139,8 @@ const paidPlanKeys = new Set<BillingPlanKey>([
   "choir_early_annual",
   "choir_monthly",
   "choir_annual",
+  "max_early_monthly",
+  "max_early_annual",
 ]);
 
 export function getDisplayPlans(
@@ -115,7 +148,9 @@ export function getDisplayPlans(
   options: DisplayPlanOptions = {}
 ): DisplayPlan[] {
   const choirEarlySupporterEnabled = options.choirEarlySupporterEnabled ?? true;
-  return BASE_PLANS.map((plan) => {
+  const maxEarlySupporterEnabled = options.maxEarlySupporterEnabled ?? true;
+  const plans = BASE_PLANS.filter((plan) => plan.cardKey !== "max" || maxEarlySupporterEnabled);
+  return plans.map((plan) => {
     const price = plan.cardKey === "choir" ? getChoirPrice(choirEarlySupporterEnabled) : plan.price;
     if (!price) {
       return {
@@ -181,6 +216,7 @@ export function isCurrentPlanCard(activePlanKey: BillingPlanKey | null | undefin
   if (!activePlanKey) return false;
   if (plan.cardKey === "free") return activePlanKey === "free";
   if (plan.cardKey === "solo") return activePlanKey === "solo_monthly" || activePlanKey === "solo_annual";
+  if (plan.cardKey === "max") return activePlanKey === "max_early_monthly" || activePlanKey === "max_early_annual";
   return (
     activePlanKey === "choir_early_monthly" ||
     activePlanKey === "choir_early_annual" ||
@@ -201,12 +237,16 @@ export function formatPlanName(planKey: BillingPlanKey | null | undefined): stri
     case "choir_early_annual":
     case "choir_annual":
       return "Choir annual";
+    case "max_early_monthly":
+      return "Max monthly";
+    case "max_early_annual":
+      return "Max annual";
     default:
       return "Free";
   }
 }
 
-export function formatPlanBadge(planKey: BillingPlanKey | null | undefined): "Free" | "Solo" | "Pro" {
+export function formatPlanBadge(planKey: BillingPlanKey | null | undefined): "Free" | "Solo" | "Pro" | "Max" {
   if (planKey === "solo_monthly" || planKey === "solo_annual") {
     return "Solo";
   }
@@ -217,6 +257,9 @@ export function formatPlanBadge(planKey: BillingPlanKey | null | undefined): "Fr
     planKey === "choir_annual"
   ) {
     return "Pro";
+  }
+  if (planKey === "max_early_monthly" || planKey === "max_early_annual") {
+    return "Max";
   }
   return "Free";
 }

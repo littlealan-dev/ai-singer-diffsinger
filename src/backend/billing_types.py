@@ -14,6 +14,8 @@ PlanKey = Literal[
     "choir_early_annual",
     "choir_monthly",
     "choir_annual",
+    "max_early_monthly",
+    "max_early_annual",
 ]
 
 StripeSubscriptionStatus = Literal[
@@ -25,7 +27,7 @@ StripeSubscriptionStatus = Literal[
     "unpaid",
 ]
 
-PlanFamily = Literal["free", "solo", "choir"]
+PlanFamily = Literal["free", "solo", "choir", "max"]
 BillingInterval = Literal["none", "month", "year"]
 
 

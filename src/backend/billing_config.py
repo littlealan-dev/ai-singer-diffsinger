@@ -43,6 +43,10 @@ class BillingConfig:
     stripe_price_choir_early_annual: str
     stripe_price_choir_monthly: str
     stripe_price_choir_annual: str
+    # Max is optional, so an env without Stripe's Max product and prices still starts.
+    stripe_product_max: str
+    stripe_price_max_early_monthly: str
+    stripe_price_max_early_annual: str
     stripe_product_topup: str
     stripe_price_topup_15: str
     topup_success_url: str
@@ -52,6 +56,7 @@ class BillingConfig:
     topup_max_active_packs: int
     topup_checkout_hold_ttl_minutes: int
     choir_early_supporter_enabled: bool
+    max_early_supporter_enabled: bool
     checkout_success_url: str
     checkout_cancel_url: str
     portal_return_url: str
@@ -169,6 +174,9 @@ def get_billing_config() -> BillingConfig:
         stripe_price_choir_early_annual=_required_env("STRIPE_PRICE_CHOIR_EARLY_ANNUAL"),
         stripe_price_choir_monthly=_required_env("STRIPE_PRICE_CHOIR_MONTHLY"),
         stripe_price_choir_annual=_required_env("STRIPE_PRICE_CHOIR_ANNUAL"),
+        stripe_product_max=_optional_env("STRIPE_PRODUCT_MAX"),
+        stripe_price_max_early_monthly=_optional_env("STRIPE_PRICE_MAX_EARLY_MONTHLY"),
+        stripe_price_max_early_annual=_optional_env("STRIPE_PRICE_MAX_EARLY_ANNUAL"),
         stripe_product_topup=_optional_env("STRIPE_PRODUCT_TOPUP"),
         stripe_price_topup_15=_optional_env("STRIPE_PRICE_TOPUP_15"),
         topup_success_url=_optional_env("STRIPE_TOPUP_SUCCESS_URL") or _required_env("STRIPE_CHECKOUT_SUCCESS_URL"),
@@ -178,6 +186,7 @@ def get_billing_config() -> BillingConfig:
         topup_max_active_packs=_env_int("TOPUP_MAX_ACTIVE_PACKS", 3),
         topup_checkout_hold_ttl_minutes=_env_int("TOPUP_CHECKOUT_HOLD_TTL_MINUTES", 30),
         choir_early_supporter_enabled=_env_bool("CHOIR_EARLY_SUPPORTER_ENABLED", False),
+        max_early_supporter_enabled=_env_bool("MAX_EARLY_SUPPORTER_ENABLED", False),
         checkout_success_url=_required_env("STRIPE_CHECKOUT_SUCCESS_URL"),
         checkout_cancel_url=_required_env("STRIPE_CHECKOUT_CANCEL_URL"),
         portal_return_url=_required_env("STRIPE_PORTAL_RETURN_URL"),

@@ -79,7 +79,8 @@ export function BillingPaywallModal({
   const embeddedCheckoutContainerRef = useRef<HTMLDivElement>(null);
   const activeEmbeddedCheckoutRef = useRef<ActiveEmbeddedCheckout | null>(null);
   const embeddedCheckoutRef = useRef<{ destroy: () => void } | null>(null);
-  const plans = useMemo(() => getDisplayPlans(interval), [interval]);
+  // The paywall offers upgrades only: Free is left out, so the paid plans and the Credit Pack fit in a row.
+  const plans = useMemo(() => getDisplayPlans(interval).filter((plan) => plan.cardKey !== "free"), [interval]);
   const activePaid = billing.activePlanKey !== "free" && paidStatuses.has(billing.stripeSubscriptionStatus || "active");
   const copy = getTriggerCopy(trigger, billing);
   const hardBlock = isHardBlockTrigger(trigger);
@@ -466,7 +467,7 @@ export function BillingPaywallModal({
               </button>
             </div>
 
-            <div className="billing-plan-grid with-topup">
+            <div className={clsx("billing-plan-grid", plans.length === 3 && "four-cards")}>
               {plans.map((plan) => (
                 <PlanCard
                   key={plan.cardKey}

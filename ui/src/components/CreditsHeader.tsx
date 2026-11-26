@@ -150,6 +150,7 @@ const CreditsHeader: React.FC<CreditsHeaderProps> = ({
 function formatPlanFamily(planFamily: PlanFamily): string {
     if (planFamily === 'solo') return 'Solo';
     if (planFamily === 'choir') return 'Choir';
+    if (planFamily === 'max') return 'Max';
     return 'Free';
 }
 

@@ -25,10 +25,12 @@ export const PENDING_CHECKOUT_PLAN_KEY = "sightsinger.pendingCheckoutPlan";
 
 const DEFAULT_EARLY_SUPPORTER_ENABLED =
   import.meta.env.VITE_CHOIR_EARLY_SUPPORTER_ENABLED !== "false";
+const MAX_EARLY_SUPPORTER_ENABLED = import.meta.env.VITE_MAX_EARLY_SUPPORTER_ENABLED !== "false";
 
 export function getDisplayPlans(interval: BillingInterval = "annual") {
   return getSharedDisplayPlans(interval, {
     choirEarlySupporterEnabled: DEFAULT_EARLY_SUPPORTER_ENABLED,
+    maxEarlySupporterEnabled: MAX_EARLY_SUPPORTER_ENABLED,
   });
 }
 
@@ -57,6 +59,8 @@ function isPaidCheckoutPlan(planKey: string | null | undefined): boolean {
     planKey === "choir_early_monthly" ||
     planKey === "choir_early_annual" ||
     planKey === "choir_monthly" ||
-    planKey === "choir_annual"
+    planKey === "choir_annual" ||
+    planKey === "max_early_monthly" ||
+    planKey === "max_early_annual"
   );
 }

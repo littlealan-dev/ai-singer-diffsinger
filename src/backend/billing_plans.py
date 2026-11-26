@@ -83,6 +83,24 @@ def get_plan_catalog(config: BillingConfig) -> dict[PlanKey, PlanDefinition]:
             config.stripe_price_choir_annual,
             config.stripe_product_choir,
         ),
+        "max_early_monthly": PlanDefinition(
+            "max_early_monthly",
+            "max",
+            "month",
+            400,
+            config.stripe_price_max_early_monthly or None,
+            config.stripe_product_max or None,
+            True,
+        ),
+        "max_early_annual": PlanDefinition(
+            "max_early_annual",
+            "max",
+            "year",
+            400,
+            config.stripe_price_max_early_annual or None,
+            config.stripe_product_max or None,
+            True,
+        ),
     }
 
 
@@ -92,10 +110,13 @@ def get_plan(plan_key: PlanKey, config: BillingConfig) -> PlanDefinition:
 
 def is_selectable_paid_plan(plan_key: PlanKey, config: BillingConfig) -> bool:
     plan = get_plan(plan_key, config)
-    if not plan.is_paid:
+    if not plan.is_paid or not plan.stripe_price_id:
         return False
-    if plan.is_early_supporter and not config.choir_early_supporter_enabled:
-        return False
+    if plan.is_early_supporter:
+        # Each family's founding offer has its own sale switch.
+        if plan.family == "max":
+            return config.max_early_supporter_enabled
+        return config.choir_early_supporter_enabled
     return True
 
 

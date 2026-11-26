@@ -198,7 +198,7 @@ def _handle_subscription_updated(payload: dict[str, Any], *, config: BillingConf
         current_period_end=_subscription_period_datetime(payload, "current_period_end"),
         cancel_at_period_end=_has_scheduled_cancel(payload),
         canceled_at=_timestamp_to_datetime(payload.get("canceled_at")),
-        is_early_supporter=plan_key.startswith("choir_early"),
+        is_early_supporter=get_plan(plan_key, billing_config).is_early_supporter,
         billing_cycle_anchor=_timestamp_to_datetime(payload.get("billing_cycle_anchor")),
     )
 

@@ -9,6 +9,8 @@ from src.backend.billing_checkout import create_checkout_session, create_embedde
 from src.backend.billing_checkout_sync import sync_checkout_session
 from src.backend.billing_config import get_billing_config, get_stripe_client
 from src.backend.billing_migration import ensure_billing_state_for_login
+from src.backend.billing_plans import is_selectable_paid_plan
+from src.backend.billing_types import BillingHttpError
 from src.backend.billing_portal import create_portal_session
 from src.backend.billing_refresh import apply_due_refresh, compute_next_monthly_refresh, run_credit_refresh
 from src.backend.billing_store import get_billing_state, revert_subscription_to_free
@@ -142,6 +144,9 @@ def billing_env(monkeypatch, firestore_emulator):
     monkeypatch.setenv("STRIPE_PRICE_CHOIR_EARLY_ANNUAL", "price_choir_early_annual")
     monkeypatch.setenv("STRIPE_PRICE_CHOIR_MONTHLY", "price_choir_monthly")
     monkeypatch.setenv("STRIPE_PRICE_CHOIR_ANNUAL", "price_choir_annual")
+    monkeypatch.setenv("STRIPE_PRODUCT_MAX", "prod_max")
+    monkeypatch.setenv("STRIPE_PRICE_MAX_EARLY_MONTHLY", "price_max_early_monthly")
+    monkeypatch.setenv("STRIPE_PRICE_MAX_EARLY_ANNUAL", "price_max_early_annual")
     monkeypatch.setenv("STRIPE_PRODUCT_TOPUP", "prod_topup")
     monkeypatch.setenv("STRIPE_PRICE_TOPUP_15", "price_topup_15")
     monkeypatch.setenv("STRIPE_TOPUP_SUCCESS_URL", "https://app.test/topup-success")
@@ -151,6 +156,7 @@ def billing_env(monkeypatch, firestore_emulator):
     monkeypatch.setenv("TOPUP_MAX_ACTIVE_PACKS", "3")
     monkeypatch.setenv("TOPUP_CHECKOUT_HOLD_TTL_MINUTES", "30")
     monkeypatch.setenv("CHOIR_EARLY_SUPPORTER_ENABLED", "true")
+    monkeypatch.setenv("MAX_EARLY_SUPPORTER_ENABLED", "true")
     monkeypatch.setenv("STRIPE_CHECKOUT_SUCCESS_URL", "https://app.test/success")
     monkeypatch.setenv("STRIPE_CHECKOUT_CANCEL_URL", "https://app.test/cancel")
     monkeypatch.setenv("STRIPE_PORTAL_RETURN_URL", "https://app.test/account")
@@ -197,6 +203,50 @@ def test_create_checkout_session_creates_customer_and_session():
     billing = get_billing_state("user-1")
     assert billing["stripeCustomerId"] == "cus_test_123"
     assert billing["stripeCheckoutSessionId"] == "cs_test_123"
+
+
+@pytest.mark.parametrize(
+    "env,max_on_sale,pro_on_sale",
+    [
+        ({}, True, True),
+        ({"MAX_EARLY_SUPPORTER_ENABLED": "false"}, False, True),
+        ({"MAX_EARLY_SUPPORTER_ENABLED": ""}, False, True),
+        ({"STRIPE_PRICE_MAX_EARLY_MONTHLY": "", "STRIPE_PRICE_MAX_EARLY_ANNUAL": ""}, False, True),
+        ({"CHOIR_EARLY_SUPPORTER_ENABLED": "false"}, True, False),
+    ],
+)
+def test_max_is_on_sale_only_with_its_own_switch_and_stripe_prices(monkeypatch, env, max_on_sale, pro_on_sale):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    get_billing_config.cache_clear()
+    config = get_billing_config()
+
+    assert [is_selectable_paid_plan(key, config) for key in ("max_early_monthly", "max_early_annual")] == [max_on_sale] * 2
+    assert is_selectable_paid_plan("choir_early_monthly", config) is pro_on_sale
+    assert is_selectable_paid_plan("solo_monthly", config) is True
+
+
+@pytest.mark.parametrize("plan_key,price_id", [("max_early_monthly", "price_max_early_monthly"), ("max_early_annual", "price_max_early_annual")])
+def test_max_checkout_uses_the_max_price_for_its_interval(plan_key, price_id):
+    ensure_billing_state_for_login("user-max", "max@example.com")
+    fake_stripe = _FakeStripeClient()
+
+    create_checkout_session("user-max", "max@example.com", plan_key, config=get_billing_config(), stripe_client=fake_stripe)
+
+    assert [item["price"] for item in fake_stripe.created_checkout_sessions[0]["line_items"]] == [price_id]
+
+
+def test_max_checkout_is_refused_when_max_is_off_sale(monkeypatch):
+    monkeypatch.setenv("MAX_EARLY_SUPPORTER_ENABLED", "false")
+    get_billing_config.cache_clear()
+    ensure_billing_state_for_login("user-max-off", "max@example.com")
+
+    with pytest.raises(BillingHttpError) as error:
+        create_checkout_session(
+            "user-max-off", "max@example.com", "max_early_monthly",
+            config=get_billing_config(), stripe_client=_FakeStripeClient(),
+        )
+    assert error.value.status_code == 400
 
 
 def test_create_embedded_subscription_checkout_session_disables_redirects():
@@ -889,6 +939,43 @@ def test_subscription_sync_updates_cancel_at_period_end_from_portal(monkeypatch)
     assert user["billing"]["stripeSubscriptionStatus"] == "active"
 
 
+@pytest.mark.parametrize(
+    "price_id,plan_key,family,early_supporter",
+    [
+        ("price_max_early_monthly", "max_early_monthly", "max", True),
+        ("price_choir_early_annual", "choir_early_annual", "choir", True),
+        ("price_choir_monthly", "choir_monthly", "choir", False),
+        ("price_solo_monthly", "solo_monthly", "solo", False),
+    ],
+)
+def test_subscription_sync_marks_founding_plans_as_early_supporter(price_id, plan_key, family, early_supporter):
+    uid = f"user-sync-{plan_key}"
+    get_or_create_credits(uid, "sync@example.com")
+    db = get_firestore_client()
+    db.collection("users").document(uid).set(
+        {"billing": {"stripeCustomerId": "cus_sync_123", "stripeSubscriptionId": "sub_sync_123"}}, merge=True
+    )
+    period_start = int(datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp())
+    fake_stripe = _FakeStripeClient()
+    fake_stripe.subscription_list_payload = [
+        {
+            "id": "sub_sync_123",
+            "status": "active",
+            "billing_cycle_anchor": period_start,
+            "created": period_start,
+            "current_period_start": period_start,
+            "current_period_end": int(datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc).timestamp()),
+            "cancel_at_period_end": False,
+            "items": {"data": [{"price": {"id": price_id}}]},
+        }
+    ]
+
+    sync_current_subscription(uid, config=get_billing_config(), stripe_client=fake_stripe)
+
+    billing = (db.collection("users").document(uid).get().to_dict() or {})["billing"]
+    assert (billing["activePlanKey"], billing["family"], billing["isEarlySupporter"]) == (plan_key, family, early_supporter)
+
+
 def test_subscription_sync_annual_plan_keeps_monthly_credit_refresh(monkeypatch):
     uid = "user-portal-annual-refresh"
     get_or_create_credits(uid, "portal-annual-refresh@example.com")
@@ -1200,6 +1287,35 @@ def test_invoice_paid_immediately_grants_monthly_plan_and_reanchors():
     assert billing["latestPaymentIntentStatus"] == "succeeded"
     assert credits["balance"] == 30
     assert credits["lastGrantType"] == "grant_paid_subscription_cycle"
+
+
+def test_invoice_paid_with_a_max_price_grants_400_credits():
+    uid = "user-max-invoice"
+    get_or_create_credits(uid, "max@example.com")
+    event_time = int(datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc).timestamp())
+
+    handle_event(
+        {
+            "id": "evt_invoice_paid_max",
+            "type": "invoice.paid",
+            "data": {
+                "object": {
+                    "id": "in_max_123",
+                    "customer": "cus_test_123",
+                    "subscription": "sub_max_123",
+                    "metadata": {"firebaseUserId": uid},
+                    "lines": {"data": [{"price": {"id": "price_max_early_annual"}}]},
+                    "status": "paid",
+                    "payment_intent": {"status": "succeeded"},
+                    "status_transitions": {"paid_at": event_time},
+                }
+            },
+        }
+    )
+
+    user = get_firestore_client().collection("users").document(uid).get().to_dict() or {}
+    assert (user["billing"]["activePlanKey"], user["billing"]["family"]) == ("max_early_annual", "max")
+    assert user["credits"]["balance"] == 400
 
 
 def test_invoice_paid_grants_monthly_plan_from_current_pricing_field():

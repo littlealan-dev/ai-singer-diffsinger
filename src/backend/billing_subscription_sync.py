@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.backend.billing_config import BillingConfig, get_billing_config, get_stripe_v1_client
-from src.backend.billing_plans import get_plan_for_price_id
+from src.backend.billing_plans import get_plan, get_plan_for_price_id
 from src.backend.billing_store import get_billing_state, revert_subscription_to_free, sync_paid_subscription_state
 from src.backend.billing_types import BillingHttpError
 
@@ -54,7 +54,7 @@ def sync_current_subscription(
         current_period_end=_subscription_period_datetime(subscription, "current_period_end"),
         cancel_at_period_end=_has_scheduled_cancel(subscription),
         canceled_at=_timestamp_to_datetime(subscription.get("canceled_at")),
-        is_early_supporter=plan_key.startswith("choir_early"),
+        is_early_supporter=get_plan(plan_key, billing_config).is_early_supporter,
         billing_cycle_anchor=_timestamp_to_datetime(subscription.get("billing_cycle_anchor")),
     )
     return {"synced": True, "status": status, "activePlanKey": plan_key}

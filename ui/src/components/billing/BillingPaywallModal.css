@@ -145,7 +145,8 @@
   align-items: stretch;
 }
 
-.billing-plan-grid.with-topup {
+/* Solo, Pro, Max and the Credit Pack. */
+.billing-plan-grid.four-cards {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
@@ -187,6 +188,13 @@
     rgba(255, 255, 255, 0.04);
 }
 
+.billing-plan-card.max {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(244, 114, 182, 0.28), transparent 50%),
+    linear-gradient(155deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.025)),
+    rgba(255, 255, 255, 0.04);
+}
+
 .billing-plan-card.topup {
   background:
     radial-gradient(circle at 52% 0%, rgba(167, 139, 250, 0.3), transparent 50%),
@@ -217,7 +225,8 @@
   font-weight: 800;
 }
 
-.billing-plan-badge.choir {
+.billing-plan-badge.choir,
+.billing-plan-badge.max {
   border: 1px solid rgba(245, 196, 94, 0.55);
   background: linear-gradient(135deg, #0f0b05, #2a1d08 58%, #4a330d);
   color: #f8d982;
@@ -330,7 +339,7 @@
   gap: 9px;
   align-content: start;
   min-height: 0;
-  max-height: 160px;
+  max-height: 200px;
   overflow: auto;
   padding-right: 4px;
 }
@@ -598,7 +607,7 @@
 }
 
 @media (max-width: 1280px) {
-  .billing-plan-grid.with-topup {
+  .billing-plan-grid.four-cards {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -608,7 +617,7 @@
     grid-template-columns: 1fr;
   }
 
-  .billing-plan-grid.with-topup {
+  .billing-plan-grid.four-cards {
     grid-template-columns: 1fr;
   }
 
