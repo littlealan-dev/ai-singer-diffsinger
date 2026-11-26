@@ -240,10 +240,35 @@ def sync_paid_subscription_state(
         "canceledAt": canceled_at,
         "isEarlySupporter": is_early_supporter,
     }
-    if billing_cycle_anchor is not None:
-        billing_payload["creditRefreshAnchor"] = billing_cycle_anchor
-        billing_payload["nextCreditRefreshAt"] = compute_next_monthly_refresh(
-            billing_cycle_anchor,
-            datetime.now(timezone.utc),
-        )
-    get_firestore_client().collection("users").document(uid).set({"billing": billing_payload}, merge=True)
+    db = get_firestore_client()
+    user_ref = db.collection("users").document(uid)
+
+    @firestore.transactional
+    def _transaction(transaction):
+        payload = dict(billing_payload)
+        if billing_cycle_anchor is not None:
+            now = datetime.now(timezone.utc)
+            payload["creditRefreshAnchor"] = billing_cycle_anchor
+            snapshot = user_ref.get(transaction=transaction)
+            data = (snapshot.to_dict() or {}) if snapshot.exists else {}
+            due_at = (data.get("billing") or {}).get("nextCreditRefreshAt")
+            # A paid invoice whose grant was deferred (credits were reserved) waits for the
+            # refresh job at a due nextCreditRefreshAt. Keep that date: moving it to the next
+            # anchor would hold back credits the user has paid for by a month.
+            if not (_paid_grant_pending(data) and due_at is not None and _to_utc(due_at) <= now):
+                payload["nextCreditRefreshAt"] = compute_next_monthly_refresh(billing_cycle_anchor, now)
+        transaction.set(user_ref, {"billing": payload}, merge=True)
+
+    _transaction(db.transaction())
+
+
+def _paid_grant_pending(data: dict[str, Any]) -> bool:
+    """The latest invoice is paid but its credits are not granted yet."""
+    billing = data.get("billing") or {}
+    credits = data.get("credits") or {}
+    latest_invoice_id = billing.get("latestInvoiceId")
+    return (
+        billing.get("latestInvoiceStatus") == "paid"
+        and bool(latest_invoice_id)
+        and latest_invoice_id != credits.get("lastGrantInvoiceId")
+    )

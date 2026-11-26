@@ -2548,3 +2548,205 @@ def test_subscription_sync_stores_and_clears_the_booked_change():
     fake_stripe.subscription_list_payload = [_switch_subscription("price_max_early_monthly")]
     sync_current_subscription(uid, config=get_billing_config(), stripe_client=fake_stripe)
     assert _stored_change(uid) is None
+
+
+# --- Credit refresh job with Max and plan changes ---
+
+
+@pytest.mark.parametrize(
+    ("plan_key", "family", "allowance"),
+    [("solo_annual", "solo", 30), ("choir_early_annual", "choir", 120), ("max_early_annual", "max", 400)],
+)
+def test_annual_monthly_refresh_grants_the_plans_allowance(plan_key, family, allowance):
+    uid = f"refresh-annual-{family}"
+    get_or_create_credits(uid, f"{uid}@example.com")
+    db = get_firestore_client()
+    now = datetime(2026, 4, 25, 13, 0, tzinfo=timezone.utc)
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "activePlanKey": plan_key,
+                "family": family,
+                "billingInterval": "year",
+                "stripeSubscriptionStatus": "active",
+                "currentPeriodEnd": now + timedelta(days=300),
+                "creditRefreshAnchor": now - timedelta(days=31),
+                "nextCreditRefreshAt": now - timedelta(minutes=1),
+            },
+            "credits": {"balance": 3, "reserved": 0, "monthlyAllowance": allowance},
+        },
+        merge=True,
+    )
+
+    assert apply_due_refresh(uid, now=now) == "applied"
+
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["credits"]["balance"] == allowance
+    assert user["credits"]["lastGrantType"] == "grant_paid_annual_monthly_refresh"
+
+
+def test_max_monthly_refresh_grants_400_only_for_a_new_paid_invoice():
+    uid = "refresh-max-monthly"
+    get_or_create_credits(uid, f"{uid}@example.com")
+    db = get_firestore_client()
+    now = datetime(2026, 4, 25, 13, 0, tzinfo=timezone.utc)
+    billing = {
+        "activePlanKey": "max_early_monthly",
+        "family": "max",
+        "billingInterval": "month",
+        "stripeSubscriptionStatus": "active",
+        "creditRefreshAnchor": now - timedelta(days=30),
+        "nextCreditRefreshAt": now - timedelta(minutes=1),
+        "latestInvoiceId": "in_max_old",
+        "latestInvoicePaidAt": now - timedelta(days=30),
+        "lastCreditRefreshAt": now - timedelta(days=30),
+    }
+    credits = {"balance": 5, "reserved": 0, "monthlyAllowance": 400, "lastGrantInvoiceId": "in_max_old"}
+    db.collection("users").document(uid).set({"billing": billing, "credits": credits}, merge=True)
+
+    assert apply_due_refresh(uid, now=now) == "waiting_for_invoice"
+
+    db.collection("users").document(uid).set(
+        {"billing": {"latestInvoiceId": "in_max_new", "latestInvoicePaidAt": now - timedelta(minutes=5)}}, merge=True
+    )
+    assert apply_due_refresh(uid, now=now) == "applied"
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["credits"]["balance"] == 400
+
+
+def test_upgrade_paid_while_credits_are_reserved_grants_once_they_are_released(monkeypatch):
+    uid = "refresh-upgrade-reserved"
+    _paid_user(uid, plan_key="choir_early_monthly")
+    db = get_firestore_client()
+    db.collection("users").document(uid).set({"credits": {"reserved": 2}}, merge=True)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _MID_MONTH if tz is not None else _MID_MONTH.replace(tzinfo=None)
+
+    monkeypatch.setattr("src.backend.billing_store.datetime", FrozenDateTime)
+    handle_event(
+        _upgrade_invoice_event(
+            "evt_reserved_upgrade_invoice",
+            uid,
+            [_invoice_line("price_max_early_monthly", 3999, proration=False)],
+            _MID_MONTH,
+        )
+    )
+    upgraded = _upgrade_subscription_event("evt_reserved_upgrade_sub", uid)
+    upgraded["data"]["object"]["items"]["data"][0]["price"]["id"] = "price_max_early_monthly"
+    handle_event(upgraded)
+
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["billing"]["activePlanKey"] == "max_early_monthly"
+    assert user["credits"]["balance"] != 400  # deferred: a render holds credits
+
+    db.collection("users").document(uid).set({"credits": {"reserved": 0}}, merge=True)
+    assert apply_due_refresh(uid, now=_MID_MONTH + timedelta(minutes=1)) == "applied"
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["credits"]["balance"] == 400
+
+
+def test_booked_downgrade_from_max_annual_keeps_400_until_the_year_ends(monkeypatch):
+    uid = "refresh-max-annual-downgrade"
+    _paid_user(uid, plan_key="max_early_annual")
+    db = get_firestore_client()
+    year_start = datetime(2026, 1, 15, 12, 0, tzinfo=timezone.utc)
+    year_end = datetime(2027, 1, 15, 12, 0, tzinfo=timezone.utc)
+    db.collection("users").document(uid).set(
+        {
+            "billing": {
+                "family": "max",
+                "billingInterval": "year",
+                "currentPeriodEnd": year_end,
+                "creditRefreshAnchor": year_start,
+                "nextCreditRefreshAt": datetime(2026, 12, 15, 12, 0, tzinfo=timezone.utc),
+                "scheduledChange": {"planKey": "choir_early_monthly", "at": year_end, "scheduleId": "sub_sched_x"},
+            },
+            "credits": {"balance": 7, "reserved": 0, "monthlyAllowance": 400},
+        },
+        merge=True,
+    )
+
+    # The last month of the Max year: still Max's 400.
+    assert apply_due_refresh(uid, now=datetime(2026, 12, 15, 12, 1, tzinfo=timezone.utc)) == "applied"
+    assert (db.collection("users").document(uid).get().to_dict() or {})["credits"]["balance"] == 400
+
+    # At the year end the schedule switches to Pro monthly and the renewal invoice is paid.
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return year_end if tz is not None else year_end.replace(tzinfo=None)
+
+    monkeypatch.setattr("src.backend.billing_store.datetime", FrozenDateTime)
+    switched = _switch_subscription(
+        "price_choir_early_monthly",
+        billing_cycle_anchor=_ts(year_end),
+        current_period_start=_ts(year_end),
+        current_period_end=_ts(datetime(2027, 2, 15, 12, 0, tzinfo=timezone.utc)),
+    )
+    switched["metadata"] = {"firebaseUserId": uid}
+    handle_event({"id": "evt_downgrade_sub", "type": "customer.subscription.updated", "data": {"object": switched}})
+    handle_event(
+        _upgrade_invoice_event(
+            "evt_downgrade_invoice", uid, [_invoice_line("price_choir_early_monthly", 1999, proration=False)], year_end
+        )
+    )
+
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert (user["billing"]["activePlanKey"], user["billing"]["billingInterval"]) == ("choir_early_monthly", "month")
+    assert user["credits"]["balance"] == 120
+    assert user["billing"]["nextCreditRefreshAt"] == datetime(2027, 2, 15, 12, 0, tzinfo=timezone.utc)
+
+
+def _sync_user(uid: str, billing: dict, credits: dict, monkeypatch, now: datetime) -> dict:
+    get_or_create_credits(uid, f"{uid}@example.com")
+    db = get_firestore_client()
+    db.collection("users").document(uid).set({"billing": billing, "credits": credits}, merge=True)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr("src.backend.billing_store.datetime", FrozenDateTime)
+    from src.backend.billing_store import sync_paid_subscription_state
+
+    sync_paid_subscription_state(
+        uid,
+        plan_key="choir_early_monthly",
+        stripe_subscription_id="sub_sync_due",
+        stripe_subscription_status="active",
+        current_period_start=now,
+        current_period_end=now + timedelta(days=30),
+        cancel_at_period_end=False,
+        canceled_at=None,
+        is_early_supporter=True,
+        billing_cycle_anchor=now - timedelta(days=1),
+    )
+    return (db.collection("users").document(uid).get().to_dict() or {})["billing"]
+
+
+@pytest.mark.parametrize(
+    ("invoice_status", "last_grant", "keeps_due_date"),
+    [
+        ("paid", "in_old", True),  # paid, grant deferred: keep it due for the refresh job
+        ("paid", "in_new", False),  # paid and granted: move on to the next anchor
+        ("open", "in_old", False),  # failed renewal: nothing to grant, move on
+    ],
+)
+def test_subscription_sync_keeps_a_due_refresh_only_while_a_paid_grant_waits(
+    monkeypatch, invoice_status, last_grant, keeps_due_date
+):
+    now = datetime(2026, 12, 15, 12, 0, tzinfo=timezone.utc)
+    due_at = now - timedelta(hours=2)
+    billing = _sync_user(
+        f"sync-due-{invoice_status}-{last_grant}",
+        {"latestInvoiceId": "in_new", "latestInvoiceStatus": invoice_status, "nextCreditRefreshAt": due_at},
+        {"lastGrantInvoiceId": last_grant, "reserved": 0},
+        monkeypatch,
+        now,
+    )
+    expected = due_at if keeps_due_date else datetime(2027, 1, 14, 12, 0, tzinfo=timezone.utc)
+    assert billing["nextCreditRefreshAt"] == expected
