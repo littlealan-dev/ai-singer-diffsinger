@@ -16,7 +16,7 @@ from tests.test_backend_api import _create_session, _upload_score, client  # noq
 
 ROOT = Path(__file__).resolve().parents[1]
 TOPICS = [
-    "upload_score", "tracks_and_mixing", "download_mix", "score_view", "sing_all",
+    "upload_score", "tracks_and_mixing", "download_mix", "score_view", "sing_a_part", "sing_all",
     "sing_all_download", "share", "song_info", "my_songs", "credits_and_plans", "credit_rates",
 ]
 
@@ -38,7 +38,7 @@ def test_the_help_names_only_controls_that_exist_in_the_ui():
     """Every quoted name in the help file is an on-screen label."""
     ui = _ui_source()
     labels = set(re.findall(r'"([^"\n]+)"', (ROOT / "src/backend/config/app_help.md").read_text(encoding="utf-8")))
-    assert {"Download zip", "Customise", "Turn off sharing", "Song info", "Upgrade"} <= labels
+    assert {"Download zip", "Customise", "Turn off sharing", "Song info", "Upgrade", "With Repeats"} <= labels
     assert sorted(label for label in labels if label not in ui) == []
     # Facts the help states, checked where the UI sets them.
     assert 'accept=".musicxml,.xml,.mxl"' in ui
@@ -108,6 +108,8 @@ def test_the_prompt_sends_how_to_questions_to_the_tool_and_answers_a_bare_help()
     assert '"name": "app_help"' in static and "app_help" not in bundle.dynamic_prompt_text
     assert "call `app_help` with the topic that fits" in static
     assert 'only asks for help with nothing specific ("Help"' in static
+    assert "offer to do it. Do it only after the user asks you to." in static
+    assert "If the score is missing, say that singing starts with uploading a MusicXML score." in static
     # The details moved to the help file.
     for moved in ('"Download mix (real-time)" in the score player', "Tracks & Stems panel", "Upload MusicXML…"):
         assert moved not in static
@@ -134,3 +136,56 @@ def test_a_how_to_question_in_the_chat_gets_the_help_and_a_message_only_reply(cl
     assert response.status_code == 200
     assert response.json()["message"] == "Use Download zip on the card."
     assert followups == [{"topic": "sing_all_download", "help": app_help.APP_HELP["sing_all_download"]}]
+
+
+class _ScriptedClient:
+    """Answers the first call with `first`, and each follow-up with prose; records what it was sent."""
+
+    def __init__(self, first: dict):
+        self.first = first
+        self.followups: list[dict] = []
+        self.prompts: list[str] = []
+
+    def generate(self, system_prompt, history, **_):
+        self.prompts.append(system_prompt)
+        last = history[-1].get("content", "") if history else ""
+        if isinstance(last, str) and last.startswith(TOOL_RESULT_PREFIX):
+            self.followups.append(json.loads(last.split("Message-only payload:\n", 1)[1]))
+            return json.dumps({"tool_calls": [], "final_message": "Made-up follow-up.", "include_score": False})
+        return json.dumps({"include_score": False, **self.first})
+
+
+def _chat_before_upload(client, first: dict, message: str):
+    test_client, app = client
+    session_id = _create_session(test_client)
+    scripted = _ScriptedClient(first)
+    app.state.llm_client = app.state.orchestrator._llm_client = scripted
+    response = test_client.post(f"/sessions/{session_id}/chat", json={"message": message})
+    assert response.status_code == 200
+    return response.json(), scripted
+
+
+def test_help_before_any_upload_is_answered_by_the_model(client):
+    body, scripted = _chat_before_upload(
+        client, {"tool_calls": [], "final_message": "Upload a score first; then I can sing it."}, "Help")
+    assert body == {"type": "chat_text", "message": "Upload a score first; then I can sing it."}
+    assert "Score status: missing." in scripted.prompts[0]
+    assert scripted.followups == []
+
+
+def test_a_how_to_question_before_any_upload_gets_the_help(client):
+    body, scripted = _chat_before_upload(
+        client, {"tool_calls": [{"name": "app_help", "arguments": {"topic": "sing_a_part"}}],
+                 "final_message": ""}, "how do I change the voice?")
+    assert body["message"] == "Made-up follow-up."
+    assert scripted.followups == [{"topic": "sing_a_part", "help": app_help.APP_HELP["sing_a_part"]}]
+    assert "Score status: missing." in scripted.prompts[1]
+
+
+def test_a_tool_that_needs_a_score_is_refused_to_the_model_before_any_upload(client):
+    body, scripted = _chat_before_upload(
+        client, {"tool_calls": [{"name": "synthesize", "arguments": {"part_id": "P1"}}],
+                 "final_message": "Singing now."}, "sing the soprano part")
+    # The model words the reply; the refused call's own text is never shown.
+    assert body["message"] == "Made-up follow-up."
+    assert scripted.followups == [{"status": "score_required", "refused_tools": ["synthesize"]}]

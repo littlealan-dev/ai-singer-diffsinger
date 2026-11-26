@@ -20,6 +20,16 @@ instruments in one file, sing each part as its own take (or use "Sing All"), the
 its size. The chat panel can be collapsed to give the score more room. "Download score" saves the
 score as a MusicXML file, and "Print score" prints it.
 
+## sing_a_part
+To sing one part, ask in the chat, for example "sing the soprano part". The buttons next to the
+chat box set how the next take is sung. "Voice" picks the AI voice; "Auto" lets the model choose.
+"Solfege" opens the solfège settings: "System" ("Movable Do" or "Fixed Do") and, for Movable Do,
+"Mode" ("Major", "Minor - La based" or "Minor - Do based"); "Apply solfege settings" saves them.
+"With Repeats" on sings the repeats; off sings the score in written order. Takes already sung keep
+the settings they were sung with. To sing solfège instead of the lyrics, ask in the chat, for
+example "sing the alto part in solfege / solfa". For every part at once, use "Sing All" and its
+"Sing in" choice.
+
 ## sing_all
 "Sing All" (the button above the chat box) sings every vocal part of the score in one go, and adds
 the instrumentals. It opens a card in the chat with the parts, their AI voices and the credit total.

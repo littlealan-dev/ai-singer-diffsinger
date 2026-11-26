@@ -578,10 +578,16 @@ class Orchestrator:
             response_message = "Acknowledged."
             include_score = self._should_include_score(message)
             if current_score is None:
-                # Require a score before any synthesis steps.
-                response_message = "Please upload a MusicXML file first."
-                await self._append_chat_reply(session_id, response_message)
-                return {"type": "chat_text", "message": response_message}
+                return await self._chat_without_score(
+                    snapshot,
+                    session_id=session_id,
+                    user_id=user_id,
+                    user_email=user_email,
+                    current_credit_availability=current_credit_availability,
+                    selected_voicebank_id=forced_voicebank_id,
+                    selected_language=forced_language,
+                    expand_repeats=expand_repeats,
+                )
 
             llm_response, llm_error = await self._decide_with_llm(
                 snapshot,
@@ -797,6 +803,90 @@ class Orchestrator:
 
             await self._append_chat_reply(session_id, response_message)
             return response
+
+    async def _chat_without_score(
+        self,
+        snapshot: Dict[str, Any],
+        *,
+        session_id: str,
+        user_id: str,
+        user_email: str,
+        current_credit_availability: Optional[Dict[str, int]],
+        selected_voicebank_id: Optional[str],
+        selected_language: Optional[str],
+        expand_repeats: bool,
+    ) -> Dict[str, Any]:
+        """A chat turn before any score is uploaded.
+
+        The model sees "Score status: missing". Only `app_help` runs: every other tool needs a
+        score, so it is refused to the model, which asks the user to upload one.
+        """
+        llm_response, llm_error = await self._decide_with_llm(
+            snapshot,
+            score_available=False,
+            session_id=session_id,
+            user_id=user_id,
+            user_email=user_email,
+            current_credit_availability=current_credit_availability,
+            selected_voicebank_id=selected_voicebank_id,
+            selected_language=selected_language,
+            expand_repeats=expand_repeats,
+        )
+        if llm_error or llm_response is None:
+            response_message = llm_error or LLM_ERROR_FALLBACK
+            await self._append_chat_reply(session_id, response_message)
+            return {"type": "chat_error", "message": response_message}
+        tool_calls = llm_response.tool_calls
+        self._logger.debug(
+            "chat_llm session=%s score=missing response=%s",
+            session_id,
+            {
+                "tool_calls": [
+                    {"name": call.name, "arguments": summarize_payload(call.arguments)}
+                    for call in tool_calls
+                ],
+                "final_message": llm_response.final_message,
+            },
+        )
+        if not tool_calls:
+            response_message = llm_response.final_message or LLM_ERROR_FALLBACK
+            await self._append_chat_reply(session_id, response_message)
+            return {"type": "chat_text", "message": response_message}
+        refused = [call.name for call in tool_calls if call.name != TOOL_APP_HELP]
+        if refused:
+            self._logger.warning("no_score_tools_refused session=%s tools=%s", session_id, refused)
+            followup_prompt = json.dumps(
+                {"status": "score_required", "refused_tools": refused}, sort_keys=True
+            )
+        else:
+            result = await self._execute_tool_calls(
+                session_id,
+                {},
+                tool_calls,
+                user_id=user_id,
+                score_summary=None,
+                user_email=user_email,
+                explicit_verse_number=None,
+            )
+            followup_prompt = result.followup_prompt or ""
+        followup_response, followup_error = await self._decide_message_only_followup_with_llm(
+            snapshot,
+            followup_prompt,
+            None,
+            session_id=session_id,
+            user_id=user_id,
+            user_email=user_email,
+            current_credit_availability=current_credit_availability,
+            selected_voicebank_id=selected_voicebank_id,
+            selected_language=selected_language,
+            expand_repeats=expand_repeats,
+        )
+        if followup_response is not None and followup_response.final_message:
+            response_message = self._format_followup_message_text(followup_response.final_message)
+        else:
+            response_message = followup_error or LLM_ERROR_FALLBACK
+        await self._append_chat_reply(session_id, response_message)
+        return {"type": "chat_text", "message": response_message}
 
     async def _append_chat_reply(self, session_id: str, message: str) -> None:
         await self._check_chat_turn_stopped()
@@ -7599,7 +7689,8 @@ class Orchestrator:
         )
         prompt_bundle = build_prompt_bundle(
             [],
-            score_available=True,
+            # A reply before any upload says so (_chat_without_score).
+            score_available=snapshot.get("current_score") is not None,
             voicebank_ids=voicebank_ids,
             score_summary=snapshot.get("score_summary"),
             parsed_score_json=(
