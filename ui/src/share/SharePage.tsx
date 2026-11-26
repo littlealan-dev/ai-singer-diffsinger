@@ -119,23 +119,26 @@ function SharedLink({ token }: { token: string }) {
     });
   }, [load, user]);
 
+  const ownSongId = load.kind === "ready" && load.data.is_owner ? load.data.song_id : null;
+
   return (
     <div className="share-page">
       <header className="share-page-header">
-        <Link to="/" className="share-page-brand" onClick={() => shareCtaClick("brand")}>SightSinger</Link>
+        <Link to="/" className="share-page-brand" onClick={() => shareCtaClick("brand")}>
+          <span className="brand-banner-crop" aria-label="SightSinger">
+            <img className="brand-banner" src="/content/images/logo-hackaton-white.png" alt="" />
+          </span>
+        </Link>
         <div className="share-page-header-actions">
-          {load.kind === "ready" && load.data.is_owner && load.data.song_id ? (
-            <Link
-              className="btn-secondary-inline"
-              to={`/app/song/${load.data.song_id}`}
-              onClick={() => shareCtaClick("open_in_app")}
-            >
-              Open in SightSinger
-            </Link>
-          ) : null}
-          {authReady && !user ? (
-            <Link className="btn-secondary-inline" to="/app" onClick={() => shareCtaClick("sign_in")}>Sign in</Link>
-          ) : null}
+          {/* One button for everyone: /app signs in when needed, and a signed-in owner goes
+              straight back to this Song. */}
+          <Link
+            className="share-page-cta"
+            to={ownSongId ? `/app/song/${ownSongId}` : "/app"}
+            onClick={() => shareCtaClick(ownSongId ? "open_in_app" : "sign_in")}
+          >
+            Sign in to sing your own song for free
+          </Link>
         </div>
       </header>
       {load.kind === "loading" ? (

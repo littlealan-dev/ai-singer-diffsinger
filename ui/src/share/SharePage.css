@@ -14,6 +14,7 @@
 
 .share-page-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -22,9 +23,41 @@
 }
 
 .share-page-brand {
-  color: var(--text-strong);
-  font-weight: 700;
+  display: block;
   text-decoration: none;
+}
+
+/* Gold on black, as the marketing site's paid-plans banner. */
+.share-page-cta {
+  display: inline-flex;
+  align-items: center;
+  padding: 10px 18px;
+  border: 1px solid rgba(245, 196, 94, 0.55);
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 24% 0%, rgba(251, 191, 36, 0.28), transparent 58%),
+    linear-gradient(135deg, #080604 0%, #171008 58%, #4a330d 100%);
+  color: #f8d982;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(245, 196, 94, 0.16);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
+}
+
+@media (max-width: 600px) {
+  /* The button gets its own row below the logo, rather than a narrow column beside it. */
+  .share-page-header-actions,
+  .share-page-cta {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+.share-page-cta:hover {
+  border-color: rgba(248, 217, 130, 0.82);
+  color: #fff4c8;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.38), 0 10px 30px rgba(245, 196, 94, 0.24);
 }
 
 .share-page-header-actions {
