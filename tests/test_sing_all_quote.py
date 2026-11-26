@@ -134,6 +134,13 @@ def test_solfege_only_forces_english_mode(monkeypatch):
     assert result["lines"][0]["credits"] == 2
 
 
+@pytest.mark.parametrize("choices,repeats", [({}, False), ({"repeats": True}, True), ({"repeats": False}, False)])
+def test_sing_all_sings_in_written_order_unless_repeats_are_turned_on(monkeypatch, choices, repeats):
+    endpoint, request, _ = _route(monkeypatch, user={"credits": {"balance": 10}}, rows=[_row()])
+    result = asyncio.run(endpoint(main.SingAllQuoteRequest(songId="song-a", choices=choices), request))
+    assert (result["options"]["repeats"], result["options"]["repeatsAvailable"]) == (repeats, True)
+
+
 def test_quote_contract_labels_repeats_and_structured_notes(monkeypatch):
     endpoint, request, snapshot = _route(
         monkeypatch, user={"credits": {"balance": 10}}, rows=[_row()])

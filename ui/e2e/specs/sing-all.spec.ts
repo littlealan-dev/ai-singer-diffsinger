@@ -62,7 +62,7 @@ function quoteFor(choices: Json, overrides: Json = {}): Json {
       mode: choices.mode ?? "lyrics",
       verse: choices.verse ?? "1",
       verses: ["1", "2"],
-      repeats: choices.repeats ?? true,
+      repeats: choices.repeats ?? false,
       repeatsAvailable: true,
       mixes: choices.mixes ?? "all",
       mixFiles: { all: sung + 1, full: 1 },
@@ -348,7 +348,7 @@ test("the button opens the card; Customise asks again and Apply sends the style 
   await expect(card(page)).toContainText("Reading the score…");
   expect(backend.quotes[0]).toEqual({ language: "en", solfegeOnly: false });
   release();
-  await expect(card(page)).toContainText("2 vocal parts · English · verse 1 of 2 · with repeats · 0:30");
+  await expect(card(page)).toContainText("2 vocal parts · English · verse 1 of 2 · no repeats · 0:30");
   const partsTable = card(page).getByRole("table", { name: "Parts & voices" });
   await expect(partsTable.getByRole("row", { name: "Soprano Voice A" })).toBeVisible();
   await expect(partsTable.getByRole("row", { name: "Alto Voice B" })).toBeVisible();
@@ -383,7 +383,7 @@ test("the button opens the card; Customise asks again and Apply sends the style 
     "Soprano", "Voice B", "airiness +10",
   ]);
   await expect(partsTable.getByRole("cell", { name: "Alto" })).toHaveCount(0);
-  await expect(card(page)).toContainText("1 vocal part · English · Warm and soft · verse 1 of 2 · with repeats · 0:30");
+  await expect(card(page)).toContainText("1 vocal part · English · Warm and soft · verse 1 of 2 · no repeats · 0:30");
   await expect(page.getByTestId("sing-all-sing-it")).toHaveText("Sing it · 2 cr");
 });
 

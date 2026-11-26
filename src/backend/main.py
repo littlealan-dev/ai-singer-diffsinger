@@ -1703,7 +1703,8 @@ def create_app() -> FastAPI:
         if not isinstance(mixes, str) or mixes not in {"all", "full", "none"}:
             raise HTTPException(status_code=422, detail={"code": "invalid_mixes"})
         repeats_available = summary.get("repeat_expansion_available") is not False
-        repeats = bool(choices.get("repeats", repeats_available)) and repeats_available
+        # Written order unless the user turns repeats on, and only when the score's repeats can be followed.
+        repeats = bool(choices.get("repeats", False)) and repeats_available
         verses = sorted({str(value) for value in summary.get("available_verses") or []},
                         key=lambda value: (not value.isdecimal(),
                                            int(value) if value.isdecimal() else value))
