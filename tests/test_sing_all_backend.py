@@ -237,7 +237,7 @@ def test_finish_updates_parent_guard_and_receipt_together(monkeypatch):
 
 
 def _start_route(monkeypatch, *, changed=False, reserve_status="reserved",
-                 reserve_reason="not_enough_credits"):
+                 reserve_reason="not_enough_credits", billing=None):
     row = {"rowId": "a", "sourcePartId": "P1", "partId": "P1",
            "partName": "Made-up lead", "name": "Made-up lead", "split": False,
            "hasWords": True, "include": True, "voice": "voice_a",
@@ -270,7 +270,10 @@ def _start_route(monkeypatch, *, changed=False, reserve_status="reserved",
     monkeypatch.setattr(main, "_get_user_context_or_401", auth)
     monkeypatch.setattr(main, "_get_snapshot_or_404", owned)
     monkeypatch.setattr(main, "read_quote", lambda db, quote_id, uid: quote)
-    user = {"billing": {"activePlanKey": "plus"}}
+    user = {"billing": ({"activePlanKey": "solo_monthly", "billingInterval": "month",
+                         "stripeSubscriptionStatus": "active"} if billing is None else billing)}
+    if billing == {}:
+        user = {}
     if reserve_reason == "sing_all_already_running":
         user["activeSingAllJobId"] = "other-parent"
     monkeypatch.setattr(main, "get_firestore_client", lambda: _Db({"users/owner": user}))
@@ -313,6 +316,22 @@ def test_sing_it_rejects_changed_score_before_reservation(monkeypatch):
         asyncio.run(endpoint(main.SingAllJobRequest(quoteId="quote-a"), request))
     assert caught.value.status_code == 409
     assert caught.value.detail == {"code": "quote_changed"}
+    assert events == []
+
+
+@pytest.mark.parametrize("billing", [
+    {"activePlanKey": "free"},
+    {},
+    # A paid plan whose subscription has ended is no paid plan.
+    {"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "canceled"},
+])
+def test_sing_it_refuses_a_user_without_a_paid_plan_before_reserving(monkeypatch, billing):
+    # The API refuses on its own: a client that skips the disabled button gets no job.
+    endpoint, request, events = _start_route(monkeypatch, billing=billing)
+    with pytest.raises(main.HTTPException) as caught:
+        asyncio.run(endpoint(main.SingAllJobRequest(quoteId="quote-a"), request))
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {"code": "free_plan"}
     assert events == []
 
 

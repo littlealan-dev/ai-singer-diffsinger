@@ -66,6 +66,7 @@ from src.backend.synthesis_pricing import (
     selected_score_duration,
 )
 from src.api.sing_all_estimate import quote_facts
+from src.backend.billing_store import has_active_paid_entitlement
 from src.backend.sing_all import (
     ACTIVE_JOB_STATUSES, ENDED_ITEM_STATUSES, add_mixes_item, available_balance_from_user, build_items, choices_hash, mark_voice_ranges,
     job_from_quote, materialize_rows, progress as sing_all_progress, quote_lines,
@@ -1623,7 +1624,7 @@ def create_app() -> FastAPI:
         db = get_firestore_client()
         user_record = await asyncio.to_thread(
             lambda: db.collection("users").document(user_id).get().to_dict() or {})
-        if (user_record.get("billing") or {}).get("activePlanKey") == "free":
+        if not has_active_paid_entitlement(user_record.get("billing")):
             raise HTTPException(status_code=409, detail={"code": "free_plan"})
         job = sing_all_retry_job(original, job_id=new_job_id, items=items,
                                  notify_email=user_email.strip() or None)
@@ -1813,7 +1814,7 @@ def create_app() -> FastAPI:
                                    instruments_sound=instruments_sound)
         total = sum(int(item["creditsReserved"]) for item in items)
         balance = available_balance_from_user(user_record)
-        blocked = ("free_plan" if (user_record.get("billing") or {}).get("activePlanKey") == "free"
+        blocked = ("free_plan" if not has_active_paid_entitlement(user_record.get("billing"))
                    else "nothing_to_sing" if not any(row["include"] for row in rows)
                    else "not_enough_credits" if total > balance
                    else "style_unavailable" if style_blocked else None)
@@ -1916,7 +1917,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail={"code": "nothing_to_sing"})
         user_record = await asyncio.to_thread(
             lambda: db.collection("users").document(user_id).get().to_dict() or {})
-        if (user_record.get("billing") or {}).get("activePlanKey") == "free":
+        if not has_active_paid_entitlement(user_record.get("billing")):
             raise HTTPException(status_code=409, detail={"code": "free_plan"})
         if style.get("note") and not style.get("controls"):
             raise HTTPException(status_code=409, detail={"code": "style_unavailable"})

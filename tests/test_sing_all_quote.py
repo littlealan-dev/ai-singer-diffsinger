@@ -105,12 +105,17 @@ def test_unsupported_language_blocks_without_model(monkeypatch):
                       "supported": ["en"]}
 
 
+_PAID = {"billing": {"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "active"}}
+
+
 @pytest.mark.parametrize("user,rows,choices,blocked", [
     ({"billing": {"activePlanKey": "free"}, "credits": {"balance": 10}},
      [_row()], {}, "free_plan"),
-    ({"credits": {"balance": 10}}, [], {}, "nothing_to_sing"),
-    ({"credits": {"balance": 1}}, [_row()], {}, "not_enough_credits"),
-    ({"credits": {"balance": 10}}, [_row()], {"styleNote": "warmer lead"},
+    # No billing state yet counts as no paid plan.
+    ({"credits": {"balance": 10}}, [_row()], {}, "free_plan"),
+    ({**_PAID, "credits": {"balance": 10}}, [], {}, "nothing_to_sing"),
+    ({**_PAID, "credits": {"balance": 1}}, [_row()], {}, "not_enough_credits"),
+    ({**_PAID, "credits": {"balance": 10}}, [_row()], {"styleNote": "warmer lead"},
      "style_unavailable"),
 ])
 def test_quote_blocked_values(monkeypatch, user, rows, choices, blocked):

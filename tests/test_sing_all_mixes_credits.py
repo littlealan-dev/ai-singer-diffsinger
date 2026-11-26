@@ -290,7 +290,8 @@ def test_quote_prices_the_mixes_and_counts_them_against_the_balance(monkeypatch)
     assert none["total"] == singing
 
     # Enough for the takes but not for the mixes: blocked; without the mixes it can start.
-    snapshot_user = {"credits": {"balance": singing + 1}}
+    snapshot_user = {"billing": {"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "active"},
+                     "credits": {"balance": singing + 1}}
     endpoint, request, snapshot = quote_route(monkeypatch, user=snapshot_user, rows=rows)
     snapshot["score_summary"]["performance_midi"] = deepcopy(
         {"instrumental_parts": [{"eligible": True, "raw_part_id": "piano",

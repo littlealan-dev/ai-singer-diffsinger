@@ -193,7 +193,7 @@ def test_a_retry_whose_takes_fail_again_ends_failed_and_can_be_retried(
     assert get_or_create_credits(uid, "").available_balance == before
 
 
-def _retry_route(monkeypatch, original, *, version=4, plan="plus", reserve=None):
+def _retry_route(monkeypatch, original, *, version=4, plan="solo_monthly", reserve=None):
     calls = []
 
     async def user_id(_request):
@@ -210,7 +210,9 @@ def _retry_route(monkeypatch, original, *, version=4, plan="plus", reserve=None)
 
     class _Doc:
         def get(self):
-            return SimpleNamespace(to_dict=lambda: {"billing": {"activePlanKey": plan}})
+            billing = ({"activePlanKey": plan, "billingInterval": "month", "stripeSubscriptionStatus": "active"}
+                       if plan not in (None, "free") else {"activePlanKey": plan})
+            return SimpleNamespace(to_dict=lambda: {"billing": billing})
 
     db = SimpleNamespace(collection=lambda _name: SimpleNamespace(document=lambda _id: _Doc()))
     monkeypatch.setattr(main, "_get_user_id_or_401", user_id)
@@ -244,11 +246,12 @@ def test_retry_routes_quote_then_start(monkeypatch):
 
 
 @pytest.mark.parametrize("original,version,plan,reserve,status,code", [
-    ({**_ended(), "uid": "someone-else"}, 4, "plus", None, 404, "job_not_found"),
-    ({**_ended(), "retriedBy": "newer"}, 4, "plus", None, 409, "not_retryable"),
-    (_ended(), 5, "plus", None, 409, "score_changed"),
+    ({**_ended(), "uid": "someone-else"}, 4, "solo_monthly", None, 404, "job_not_found"),
+    ({**_ended(), "retriedBy": "newer"}, 4, "solo_monthly", None, 409, "not_retryable"),
+    (_ended(), 5, "solo_monthly", None, 409, "score_changed"),
     (_ended(), 4, "free", None, 409, "free_plan"),
-    (_ended(), 4, "plus", SimpleNamespace(status="insufficient_balance", reason=None),
+    (_ended(), 4, None, None, 409, "free_plan"),
+    (_ended(), 4, "solo_monthly", SimpleNamespace(status="insufficient_balance", reason=None),
      409, "not_enough_credits"),
 ])
 def test_retry_route_refusals(monkeypatch, original, version, plan, reserve, status, code):

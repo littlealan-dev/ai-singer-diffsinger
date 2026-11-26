@@ -804,7 +804,8 @@ def test_sing_it_through_four_player_tracks_never_calls_the_model(
     parent_environment, monkeypatch,
 ):
     db, uid, session_id, _fixture_job_id = parent_environment
-    db.collection("users").document(uid).update({"billing.activePlanKey": "plus"})
+    db.collection("users").document(uid).update({"billing.activePlanKey": "solo_monthly", "billing.billingInterval": "month",
+                                             "billing.stripeSubscriptionStatus": "active"})
     before = get_or_create_credits(uid, "").available_balance
     selection = {"number": "1", "name": "Made-up words"}
     rows = [{
