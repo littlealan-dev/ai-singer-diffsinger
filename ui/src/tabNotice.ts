@@ -53,10 +53,19 @@ function clearMark() {
 }
 
 /** Chime and mark the tab's title, only when the tab is hidden. Returns whether it did. */
-export function noticeInBackground(): boolean {
+export function noticeInBackground(onReturn?: (awaySeconds: number) => void): boolean {
   if (!document.hidden) return false;
   chime();
   if (!document.title.startsWith(TITLE_MARK)) document.title = TITLE_MARK + document.title;
   document.addEventListener("visibilitychange", clearMark);
+  if (onReturn) {
+    const noticedAt = performance.now();
+    const reportReturn = () => {
+      if (document.hidden) return;
+      document.removeEventListener("visibilitychange", reportReturn);
+      onReturn((performance.now() - noticedAt) / 1000);
+    };
+    document.addEventListener("visibilitychange", reportReturn);
+  }
   return true;
 }

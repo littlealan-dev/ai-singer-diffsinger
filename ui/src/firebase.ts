@@ -1,6 +1,6 @@
 import { initializeApp } from "firebase/app";
 import {
-  getAnalytics,
+  initializeAnalytics,
   logEvent,
   setUserProperties,
   type Analytics,
@@ -88,11 +88,46 @@ if (app && appCheckSiteKey && !isDev) {
 
 export { auth, app, db };
 
+function analyticsConsented(): boolean {
+  try {
+    return window.localStorage.getItem("analytics_consent") === "granted";
+  } catch {
+    return false;
+  }
+}
+
+const analyticsCampaignKeys = new Set([
+  "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "utm_id", "utm_source_platform",
+]);
+
+function analyticsCampaignQuery(search: string): string {
+  const campaign = new URLSearchParams();
+  new URLSearchParams(search).forEach((value, key) => {
+    if (analyticsCampaignKeys.has(key)) campaign.append(key, value);
+  });
+  const query = campaign.toString();
+  return query ? `?${query}` : "";
+}
+
+function analyticsPage(campaignQuery = analyticsCampaignQuery(window.location.search)) {
+  const { origin, pathname } = window.location;
+  // Once these pages load, their paths or titles can contain private Song data.
+  const path = pathname.startsWith("/s/") ? "/s"
+    : pathname.startsWith("/app/") ? "/app"
+    : pathname.startsWith("/jobs/") ? "/jobs"
+    : pathname;
+  return {
+    page_location: origin + path + campaignQuery,
+    page_path: path + campaignQuery,
+    page_title: "SightSinger",
+    page_referrer: document.referrer ? new URL(document.referrer).origin : "",
+  };
+}
+
 export function initAnalytics(): Analytics | null {
-  if (!app || !firebaseConfig.measurementId) return null;
-  if (typeof window === "undefined") return null;
+  if (!analyticsConsented() || !app || !firebaseConfig.measurementId) return null;
   if (!analytics) {
-    analytics = getAnalytics(app);
+    analytics = initializeAnalytics(app, { config: analyticsPage() });
     if (import.meta.env.VITE_APP_ENV) {
       setUserProperties(analytics, { env: import.meta.env.VITE_APP_ENV });
     }
@@ -101,9 +136,11 @@ export function initAnalytics(): Analytics | null {
 }
 
 export function logPageView(instance?: Analytics | null) {
+  if (!analyticsConsented()) return;
   const active = instance ?? analytics ?? initAnalytics();
   if (!active || typeof window === "undefined") return;
-  if (!hasUtmParams(window.location.search)) return;
+  const campaignQuery = analyticsCampaignQuery(window.location.search);
+  if (!campaignQuery) return;
   try {
     const key = "ga_page_view_logged";
     if (window.sessionStorage.getItem(key)) return;
@@ -113,14 +150,13 @@ export function logPageView(instance?: Analytics | null) {
   }
   const env = import.meta.env.VITE_APP_ENV as string | undefined;
   logEvent(active, "page_view", {
-    page_location: window.location.href,
-    page_path: window.location.pathname + window.location.search,
-    page_title: document.title,
+    ...analyticsPage(campaignQuery),
     ...(env ? { env } : {}),
   });
 }
 
 export function logAnalyticsEvent(eventName: string, params: Record<string, unknown> = {}) {
+  if (!analyticsConsented()) return;
   const active = analytics ?? initAnalytics();
   if (!active || typeof window === "undefined") return;
   const env = import.meta.env.VITE_APP_ENV as string | undefined;
@@ -132,14 +168,6 @@ export function logAnalyticsEvent(eventName: string, params: Record<string, unkn
   } catch (error) {
     console.warn("[analytics] failed to log event", eventName, error);
   }
-}
-
-function hasUtmParams(search: string): boolean {
-  if (!search) return false;
-  const params = new URLSearchParams(search);
-  return ["utm_source", "utm_medium", "utm_campaign", "utm_id", "utm_source_platform"].some(
-    (key) => params.has(key)
-  );
 }
 
 export async function getAppCheckToken(): Promise<string | null> {

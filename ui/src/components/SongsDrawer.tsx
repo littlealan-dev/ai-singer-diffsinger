@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { ApiError, deleteSong, listSongs, type SongRow } from "../api";
+import { shareDialogOpen } from "../analytics";
 import ShareSongModal, { shareBlockedReason, type ShareState } from "../share/ShareSongModal";
 import "./SongsDrawer.css";
 
@@ -195,7 +196,10 @@ export default function SongsDrawer({
                         className="btn-secondary-inline"
                         disabled={shareBlocked !== null}
                         title={shareBlocked ?? undefined}
-                        onClick={() => setSharing(song)}
+                        onClick={() => {
+                          shareDialogOpen("my_songs");
+                          setSharing(song);
+                        }}
                       >
                         Share
                       </button>
@@ -225,6 +229,7 @@ export default function SongsDrawer({
             songId={sharing.id}
             title={sharing.title}
             url={null}
+            alreadyShared={sharing.shared}
             onClose={() => setSharing(null)}
             onShareChange={(songId, share) => {
               setSongs((current) =>

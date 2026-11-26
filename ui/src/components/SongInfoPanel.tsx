@@ -10,6 +10,7 @@ import {
   type SongRow,
   updateSongInfo,
 } from "../api";
+import { songInfoSaved } from "../analytics";
 import "./SongInfoPanel.css";
 
 const TEXT_FIELDS: Array<{ key: keyof SongInfoEdit; label: string; limit: number }> = [
@@ -95,7 +96,14 @@ export default function SongInfoPanel({ songId, info, onClose, onSaved }: SongIn
     setSaving(true);
     setError(null);
     try {
-      onSaved(await updateSongInfo(songId, changes));
+      const saved = await updateSongInfo(songId, changes);
+      songInfoSaved(
+        Object.keys(edits).length + Number(changes.title !== undefined),
+        saved.info?.license ?? draft.license,
+        changes.title !== undefined,
+        Boolean((saved.info?.description ?? draft.description).trim()),
+      );
+      onSaved(saved);
       onClose();
     } catch (err) {
       setError(
