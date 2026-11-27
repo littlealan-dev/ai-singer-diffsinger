@@ -71,6 +71,28 @@
   font-size: 1rem;
 }
 
+/* The heading when the paywall opens from the sale's bar: the bar's gold and black. */
+.billing-sale-heading {
+  display: grid;
+  gap: 10px;
+  padding: 18px 28px 20px;
+  border: 1px solid rgba(245, 196, 94, 0.55);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 30% 0%, rgba(251, 191, 36, 0.24), transparent 55%),
+    linear-gradient(100deg, #080604 0%, #1c1307 45%, #3a280b 75%, #5a3f10 100%);
+  box-shadow: 0 10px 30px rgba(245, 196, 94, 0.16);
+}
+
+.billing-modal-header .billing-sale-heading h2 {
+  color: #fff4c8;
+}
+
+.billing-modal-header .billing-sale-heading p {
+  color: #e9cf86;
+  font-weight: 600;
+}
+
 .billing-modal-detail,
 .billing-status-note,
 .billing-status-warning,

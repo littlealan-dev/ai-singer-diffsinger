@@ -446,8 +446,18 @@ export function BillingPaywallModal({
           <X size={18} />
         </button>
         <header className="billing-modal-header">
-          <h2 id="billing-modal-title">{copy.title}</h2>
-          <p>{copy.subtitle}</p>
+          {trigger === "sale_bar" ? (
+            // Opened from the sale's bar: the heading in the bar's gold and black.
+            <div className="billing-sale-heading">
+              <h2 id="billing-modal-title">{copy.title}</h2>
+              <p>{copy.subtitle}</p>
+            </div>
+          ) : (
+            <>
+              <h2 id="billing-modal-title">{copy.title}</h2>
+              <p>{copy.subtitle}</p>
+            </>
+          )}
           {detail ? <p className="billing-modal-detail">{detail}</p> : null}
           {hasBillingPaymentIssue(billing) ? (
             <div className="billing-status-warning" role="alert">
