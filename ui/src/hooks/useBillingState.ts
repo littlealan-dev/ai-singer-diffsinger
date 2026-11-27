@@ -132,13 +132,13 @@ export function useBillingState(): BillingState {
           activePlanKey,
           family: normalizeFamily(billing.family),
           billingInterval: normalizeInterval(billing.billingInterval),
-          stripeSubscriptionStatus: billing.stripeSubscriptionStatus || null,
-          latestInvoiceId: billing.latestInvoiceId || null,
-          latestInvoiceStatus: billing.latestInvoiceStatus || null,
-          latestPaymentIntentStatus: billing.latestPaymentIntentStatus || null,
-          latestPaymentFailureCode: billing.latestPaymentFailureCode || null,
-          latestPaymentFailureMessage: billing.latestPaymentFailureMessage || null,
-          stripeCustomerId: billing.stripeCustomerId || null,
+          stripeSubscriptionStatus: textOrNull(billing.stripeSubscriptionStatus),
+          latestInvoiceId: textOrNull(billing.latestInvoiceId),
+          latestInvoiceStatus: textOrNull(billing.latestInvoiceStatus),
+          latestPaymentIntentStatus: textOrNull(billing.latestPaymentIntentStatus),
+          latestPaymentFailureCode: textOrNull(billing.latestPaymentFailureCode),
+          latestPaymentFailureMessage: textOrNull(billing.latestPaymentFailureMessage),
+          stripeCustomerId: textOrNull(billing.stripeCustomerId),
           cancelAtPeriodEnd: Boolean(billing.cancelAtPeriodEnd),
           currentPeriodEnd: toDate(billing.currentPeriodEnd),
           nextCreditRefreshAt: toDate(billing.nextCreditRefreshAt),
@@ -239,6 +239,10 @@ function toDate(value: unknown): Date | null {
 
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function textOrNull(value: unknown): string | null {
+  return typeof value === "string" && value ? value : null;
 }
 
 function finiteNumber(value: unknown): number | null {

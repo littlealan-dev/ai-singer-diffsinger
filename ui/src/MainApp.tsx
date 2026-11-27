@@ -6561,7 +6561,7 @@ export default function MainApp() {
                       primeScorePlayerAudioContext();
                     }
                   }}
-                  onClick={browserMixBounceActive ? cancelBrowserMixBounce : () => void handleBrowserMixBounce()}
+                  onClick={browserMixBounceActive ? () => cancelBrowserMixBounce() : () => void handleBrowserMixBounce()}
                   disabled={
                     !browserMixBounceActive &&
                     (!hasScorePlayerTracks ||
