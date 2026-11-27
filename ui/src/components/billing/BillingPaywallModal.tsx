@@ -19,6 +19,8 @@ import {
   formatPlanBadge,
   getDisplayPlans,
   getPlanChangeKind,
+  ANNUAL_PROMO,
+  getTopupPackOffer,
   INCLUDED_IN_EVERY_PLAN_FEATURES,
   planChangeAppliesNow,
   isCurrentPlanCard,
@@ -48,7 +50,9 @@ export type PaywallTrigger =
   // The Sing All quote card's Top up and Upgrade: the same paywall as insufficient_credits and
   // billing_menu, named so the billing events say the purchase started from Sing All.
   | "sing_all_topup"
-  | "sing_all_upgrade";
+  | "sing_all_upgrade"
+  // The sale's countdown bar above the app header.
+  | "sale_bar";
 
 type BillingPaywallModalProps = {
   isOpen: boolean;
@@ -840,23 +844,31 @@ function CreditRatesTable() {
 
 function TopupPlanCard({ billing, busy, emphasized, disabled, onCheckout }: TopupCardProps) {
   const remainingSlots = Math.max(0, 3 - billing.topupActivePackCount);
+  const offer = getTopupPackOffer();
   return (
     <article className={clsx("billing-plan-card", "topup", "billing-topup-plan-card", emphasized && "emphasized")}>
-      <div className="billing-plan-badge topup">One-off</div>
+      <div className={clsx("billing-plan-badge", offer.saleLabel ? "sale" : "topup")}>
+        {offer.saleLabel ?? "One-off"}
+      </div>
       <div className="billing-plan-head">
         <h3>Credit Pack</h3>
         <p>Add credits without a monthly commitment.</p>
       </div>
       <div className="billing-plan-price">
-        <span className="billing-price-main">$5</span>
+        <span className="billing-price-main">{offer.priceLabel}</span>
         <span className="billing-price-suffix">/ pack</span>
+        {offer.savingsLabel ? <span className="billing-savings">{offer.savingsLabel}</span> : null}
       </div>
       <p className="billing-secondary-price">
         <span>One-time purchase</span>
       </p>
       <div className="billing-credit-line">
         <div>
-          <strong>15 credits</strong>
+          <strong>
+            {offer.saleLabel ? <del className="billing-original-credits">{offer.usualCredits}</del> : null}
+            {offer.saleLabel ? " " : null}
+            {offer.credits} credits
+          </strong>
           <span> per pack</span>
         </div>
         <span>Expires in 180 days. Non-refundable.</span>
@@ -991,6 +1003,11 @@ function getTriggerCopy(trigger: PaywallTrigger, billing: BillingState): { title
       return {
         title: "Changing your plan",
         subtitle: "Your plan and monthly credits update here once Stripe confirms.",
+      };
+    case "sale_bar":
+      return {
+        title: ANNUAL_PROMO ? `${ANNUAL_PROMO.label}: ${ANNUAL_PROMO.percentOff}% off` : "Choose a plan",
+        subtitle: "Your first year of Pro or Max annual, and Credit Packs for paid plans.",
       };
     case "credits_pill":
       if (billing.activePlanKey !== "free") {

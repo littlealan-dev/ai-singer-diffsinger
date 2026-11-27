@@ -80,6 +80,24 @@ def create_embedded_topup_checkout_session(
     )
 
 
+def topup_credits_per_pack(config: BillingConfig, *, now: datetime | None = None) -> int:
+    """Credits in one pack bought now: the sale's amount until the sale ends, else the usual one."""
+    current = now or datetime.now(timezone.utc)
+    if (config.topup_promo_credit_amount > 0 and config.topup_promo_ends_at is not None
+            and current < config.topup_promo_ends_at):
+        return config.topup_promo_credit_amount
+    return config.topup_pack_credit_amount
+
+
+def _checkout_credits_per_pack(metadata: dict[str, Any], config: BillingConfig) -> int:
+    """The credits per pack fixed when the checkout started; a session from before that, the usual."""
+    try:
+        amount = int(str(metadata.get("creditAmount") or "").strip())
+    except ValueError:
+        return config.topup_pack_credit_amount
+    return amount if amount > 0 else config.topup_pack_credit_amount
+
+
 def _create_topup_checkout_session(
     uid: str,
     email: str,
@@ -141,7 +159,9 @@ def _create_topup_checkout_session(
             "firebaseUserId": uid,
             "purchaseType": "topup",
             "packKey": TOPUP_PACK_KEY,
-            "creditAmount": str(billing_config.topup_pack_credit_amount),
+            # The credits per pack are fixed when the checkout starts, so a sale that ends while
+            # the buyer pays still gives the sale's amount.
+            "creditAmount": str(topup_credits_per_pack(billing_config)),
             "checkoutHoldId": hold_id,
             "maxQuantity": str(remaining_slots),
             **({"checkoutUiMode": "embedded"} if embedded else {}),
@@ -291,6 +311,9 @@ def apply_topup_checkout_completed(
     quantity = _resolve_topup_quantity(payload, billing_config, stripe_client=stripe_client)
     if quantity <= 0:
         raise BillingHttpError(409, "Top-up checkout session has no purchased credit packs.")
+    credits_per_pack = _checkout_credits_per_pack(metadata, billing_config)
+    amount_total = payload.get("amount_total")
+    price_cents_per_pack = int(amount_total) // quantity if isinstance(amount_total, int) else None
 
     db = get_firestore_client()
     user_ref = db.collection("users").document(uid)
@@ -337,7 +360,7 @@ def apply_topup_checkout_completed(
 
         credits = user_data.get("credits") if isinstance(user_data.get("credits"), dict) else {}
         subscription_balance = int(credits.get("balance", 0) or 0)
-        total_granted = quantity * billing_config.topup_pack_credit_amount
+        total_granted = quantity * credits_per_pack
         overdraft_recovery = min(max(0, -subscription_balance), total_granted)
         topup_grant_remaining = total_granted - overdraft_recovery
         new_subscription_balance = subscription_balance + overdraft_recovery
@@ -348,7 +371,7 @@ def apply_topup_checkout_completed(
         for index in range(quantity):
             pack_id = f"topup_{_safe_doc_id(session_id)}_{index + 1}"
             pack_ref = db.collection("topup_packs").document(pack_id)
-            pack_credits = min(billing_config.topup_pack_credit_amount, max(0, remaining_for_packs))
+            pack_credits = min(credits_per_pack, max(0, remaining_for_packs))
             remaining_for_packs -= pack_credits
             status = "active" if pack_credits > 0 else "exhausted"
             transaction.set(
@@ -357,10 +380,10 @@ def apply_topup_checkout_completed(
                     "userId": uid,
                     "packId": pack_id,
                     "packKey": TOPUP_PACK_KEY,
-                    "creditsGranted": billing_config.topup_pack_credit_amount,
+                    "creditsGranted": credits_per_pack,
                     "creditsRemaining": pack_credits,
                     "creditsReserved": 0,
-                    "priceCents": 500,
+                    "priceCents": price_cents_per_pack,
                     "currency": "usd",
                     "stripePaymentIntentId": payment_intent_id,
                     "stripeCheckoutSessionId": session_id,
@@ -386,7 +409,7 @@ def apply_topup_checkout_completed(
                 {
                     "userId": uid,
                     "type": "topup_grant",
-                    "amount": billing_config.topup_pack_credit_amount,
+                    "amount": credits_per_pack,
                     "packId": pack_id,
                     "stripePaymentIntentId": payment_intent_id,
                     "stripeCheckoutSessionId": session_id,

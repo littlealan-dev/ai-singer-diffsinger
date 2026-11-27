@@ -226,7 +226,8 @@
 }
 
 .billing-plan-badge.choir,
-.billing-plan-badge.max {
+.billing-plan-badge.max,
+.billing-plan-badge.sale {
   border: 1px solid rgba(245, 196, 94, 0.55);
   background: linear-gradient(135deg, #0f0b05, #2a1d08 58%, #4a330d);
   color: #f8d982;
@@ -321,6 +322,11 @@
 .billing-credit-line strong {
   color: #fff;
   overflow-wrap: anywhere;
+}
+
+.billing-original-credits {
+  color: rgba(203, 213, 225, 0.72);
+  text-decoration-thickness: 2px;
 }
 
 .billing-credit-line div span,

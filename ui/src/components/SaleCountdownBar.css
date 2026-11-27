@@ -1,0 +1,67 @@
+.sale-countdown-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.45rem 0.35rem 1rem;
+  border: 1px solid rgba(245, 196, 94, 0.55);
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 24% 0%, rgba(251, 191, 36, 0.28), transparent 58%),
+    linear-gradient(135deg, #080604 0%, #171008 58%, #4a330d 100%);
+  color: #f8d982;
+  box-shadow: 0 10px 30px rgba(245, 196, 94, 0.14);
+  font-size: 0.9rem;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.sale-countdown-bar:hover {
+  border-color: rgba(248, 217, 130, 0.82);
+}
+
+.sale-countdown-link {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem 1rem;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: center;
+}
+
+.sale-countdown-link strong {
+  color: #fff4c8;
+}
+
+.sale-countdown-clock {
+  color: #fff4c8;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sale-countdown-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 1.65rem;
+  height: 1.65rem;
+  border: 1px solid rgba(248, 217, 130, 0.36);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.32);
+  color: #fff4c8;
+  cursor: pointer;
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.sale-countdown-close:hover {
+  border-color: rgba(248, 217, 130, 0.75);
+  background: rgba(248, 217, 130, 0.12);
+}

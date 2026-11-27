@@ -123,11 +123,13 @@ import {
   syncCheckoutSession,
 } from "./billing/api";
 import {
+  ANNUAL_PROMO,
   clearPendingCheckoutPlan,
   getStoredPendingCheckoutPlan,
   isPaidPlanKey,
   type BillingPlanKey,
 } from "./billing/plans";
+import { SaleCountdownBar } from "./components/SaleCountdownBar";
 
 const SCORE_PREVIEW_RENDER_ERROR =
   "This score was uploaded, but its notation data looks malformed and cannot be rendered in the preview.";
@@ -5625,6 +5627,7 @@ export default function MainApp() {
 
   return (
     <div className="app-shell">
+      {ANNUAL_PROMO ? <SaleCountdownBar promo={ANNUAL_PROMO} onOpen={() => openPaywall("sale_bar")} /> : null}
       <header className="app-header">
         <div className="brand" onClick={handleBrandClick} style={{ cursor: "pointer" }}>
           <span className="brand-banner-crop" aria-label="SightSinger">

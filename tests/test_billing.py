@@ -28,6 +28,7 @@ from src.backend.billing_store import (
 )
 from src.backend.billing_subscription_sync import sync_current_subscription
 from src.backend.billing_topup import (
+    topup_credits_per_pack,
     cancel_topup_checkout_session,
     create_embedded_topup_checkout_session,
     create_topup_checkout_session,
@@ -2937,3 +2938,79 @@ class _FrozenSaleTime(datetime):
     @classmethod
     def now(cls, tz=None):
         return datetime(2026, 11, 27, 15, 0, tzinfo=tz or timezone.utc)
+
+
+# --- Credit Pack sale (Black Friday 2026): 40 credits a pack until the sale ends, then 30 ---
+
+
+@pytest.mark.parametrize(
+    ("now", "expected"),
+    [
+        (datetime(2026, 11, 28, tzinfo=timezone.utc), 40),
+        (datetime(2026, 12, 4, 23, 59, tzinfo=timezone.utc), 40),
+        (datetime(2026, 12, 5, tzinfo=timezone.utc), 30),
+    ],
+)
+def test_a_credit_pack_holds_the_sale_amount_until_the_sale_ends(now, expected):
+    config = dataclasses.replace(
+        get_billing_config(),
+        topup_pack_credit_amount=30,
+        topup_promo_credit_amount=40,
+        topup_promo_ends_at=datetime(2026, 12, 5, tzinfo=timezone.utc),
+    )
+    assert topup_credits_per_pack(config, now=now) == expected
+
+
+def test_without_a_sale_a_credit_pack_holds_the_usual_amount():
+    config = dataclasses.replace(get_billing_config(), topup_pack_credit_amount=30)
+    assert topup_credits_per_pack(config) == 30
+    no_end = dataclasses.replace(config, topup_promo_credit_amount=40)
+    assert topup_credits_per_pack(no_end) == 30
+
+
+def test_a_checkout_started_in_the_sale_grants_the_sale_amount_even_after_it_ends():
+    uid = "user-topup-sale"
+    get_or_create_credits(uid, "topup-sale@example.com")
+    _make_active_paid(uid)
+    fake_stripe = _FakeStripeClient()
+    sale = dataclasses.replace(
+        get_billing_config(),
+        topup_pack_credit_amount=30,
+        topup_promo_credit_amount=40,
+        topup_promo_ends_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    create_topup_checkout_session(uid, "topup-sale@example.com", config=sale, stripe_client=fake_stripe)
+    metadata = fake_stripe.created_checkout_sessions[0]["metadata"]
+    assert metadata["creditAmount"] == "40"
+    fake_stripe.line_items_payload = {"data": [{"quantity": 2, "price": {"id": "price_topup_15"}}]}
+    ended = dataclasses.replace(sale, topup_promo_ends_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+
+    handle_event(
+        {
+            "id": "evt_topup_sale_completed",
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": "cs_test_sale",
+                    "mode": "payment",
+                    "status": "complete",
+                    "payment_status": "paid",
+                    "customer": "cus_test_123",
+                    "client_reference_id": uid,
+                    "payment_intent": "pi_topup_sale",
+                    "amount_total": 2000,
+                    "metadata": metadata,
+                }
+            },
+        },
+        config=ended,
+        stripe_client=fake_stripe,
+    )
+
+    db = get_firestore_client()
+    user = db.collection("users").document(uid).get().to_dict() or {}
+    assert user["topupCredits"]["totalRemaining"] == 80
+    pack = db.collection("topup_packs").document("topup_cs_test_sale_1").get().to_dict() or {}
+    assert (pack["creditsGranted"], pack["priceCents"]) == (40, 1000)
+    ledger = db.collection("credit_ledger").document("topup_grant_cs_test_sale_1").get().to_dict() or {}
+    assert ledger["amount"] == 40

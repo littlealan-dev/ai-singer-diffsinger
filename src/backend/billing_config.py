@@ -76,6 +76,10 @@ class BillingConfig:
     # Friday 2026). Without both, there is no sale.
     annual_promo_coupon_id: str = ""
     annual_promo_ends_at: datetime | None = None
+    # A sale on the Credit Pack: this many credits per pack instead of topup_pack_credit_amount,
+    # for checkouts started before topup_promo_ends_at.
+    topup_promo_credit_amount: int = 0
+    topup_promo_ends_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -196,7 +200,7 @@ def get_billing_config() -> BillingConfig:
         topup_success_url=_optional_env("STRIPE_TOPUP_SUCCESS_URL") or _required_env("STRIPE_CHECKOUT_SUCCESS_URL"),
         topup_cancel_url=_optional_env("STRIPE_TOPUP_CANCEL_URL") or _required_env("STRIPE_CHECKOUT_CANCEL_URL"),
         topup_pack_expiry_days=_env_int("TOPUP_PACK_EXPIRY_DAYS", 180),
-        topup_pack_credit_amount=_env_int("TOPUP_PACK_CREDIT_AMOUNT", 15),
+        topup_pack_credit_amount=_env_int("TOPUP_PACK_CREDIT_AMOUNT", 30),
         topup_max_active_packs=_env_int("TOPUP_MAX_ACTIVE_PACKS", 3),
         topup_checkout_hold_ttl_minutes=_env_int("TOPUP_CHECKOUT_HOLD_TTL_MINUTES", 30),
         choir_early_supporter_enabled=_env_bool("CHOIR_EARLY_SUPPORTER_ENABLED", False),
@@ -208,6 +212,8 @@ def get_billing_config() -> BillingConfig:
         stripe_api_version=os.getenv("STRIPE_API_VERSION", "2026-11-18.endive").strip(),
         annual_promo_coupon_id=_optional_env("ANNUAL_PROMO_COUPON_ID"),
         annual_promo_ends_at=_env_datetime("ANNUAL_PROMO_ENDS_AT"),
+        topup_promo_credit_amount=_env_int("TOPUP_PROMO_CREDIT_AMOUNT", 0),
+        topup_promo_ends_at=_env_datetime("TOPUP_PROMO_ENDS_AT"),
     )
 
 
