@@ -131,15 +131,22 @@ function SharedLink({ token }: { token: string }) {
           </span>
         </Link>
         <div className="share-page-header-actions">
-          {/* One button for everyone: /app signs in when needed, and a signed-in owner goes
-              straight back to this Song. */}
-          <Link
-            className="share-page-cta"
-            to={ownSongId ? `/app/song/${ownSongId}` : "/app"}
-            onClick={() => shareCtaClick(ownSongId ? "open_in_app" : "sign_in")}
-          >
-            Sign in to sing your own song for free
-          </Link>
+          {/* One button for everyone. A visitor may not know SightSinger yet, so it opens the
+              marketing site's home page rather than sign-in; a signed-in owner goes straight back
+              to this Song. */}
+          {ownSongId ? (
+            <Link
+              className="share-page-cta"
+              to={`/app/song/${ownSongId}`}
+              onClick={() => shareCtaClick("open_in_app")}
+            >
+              Sign in to sing your own song for free
+            </Link>
+          ) : (
+            <a className="share-page-cta" href={marketingUrl("/")} onClick={() => shareCtaClick("marketing_home")}>
+              Sign in to sing your own song for free
+            </a>
+          )}
         </div>
       </header>
       {load.kind === "loading" ? (

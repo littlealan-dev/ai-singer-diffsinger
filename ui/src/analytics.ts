@@ -206,6 +206,6 @@ export function shareControlUse(control: ShareControl) {
   logAnalyticsEvent("share_control_use", { control });
 }
 
-export function shareCtaClick(target: "sign_in" | "open_in_app" | "credits_page" | "license" | "brand") {
+export function shareCtaClick(target: "marketing_home" | "open_in_app" | "credits_page" | "license" | "brand") {
   logAnalyticsEvent("share_cta_click", { target });
 }
