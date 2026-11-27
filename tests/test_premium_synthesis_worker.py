@@ -138,7 +138,8 @@ def test_premium_route_reaches_the_premium_worker_with_the_shared_identity(monke
 @pytest.mark.parametrize(
     ("env", "message"),
     [
-        ({"SYNTHESIS_PREMIUM_ROUTING": "sometimes"}, "must be one of off, allowlist"),
+        ({"SYNTHESIS_PREMIUM_ROUTING": "sometimes"}, "must be one of off, allowlist, sing_all"),
+        ({"SYNTHESIS_PREMIUM_ROUTING": "sing_all"}, "SYNTHESIS_DISPATCH_MODE"),
         ({"SYNTHESIS_PREMIUM_ROUTING": "allowlist"}, "SYNTHESIS_DISPATCH_MODE"),
         (
             {
@@ -189,6 +190,25 @@ _LISTS = {
 def test_allowlist_matches_uids_or_emails_whether_or_not_maintenance_is_on(user_id, email, expected):
     routing = PremiumSynthesisRouting("allowlist", load_config=lambda: _LISTS)
     assert routing.is_premium(user_id, email) is expected
+
+
+@pytest.mark.parametrize(
+    ("sing_all_take", "expected"),
+    [(True, True), (False, False)],
+)
+def test_sing_all_routing_sends_sing_all_takes_whoever_the_user_is(sing_all_take, expected):
+    def must_not_load():
+        raise AssertionError("sing_all routing does not read the tester lists")
+
+    routing = PremiumSynthesisRouting("sing_all", load_config=must_not_load)
+    assert routing.is_premium("uid-tester", "tester@example.com", sing_all_take=sing_all_take) is expected
+    assert routing.is_premium("someone", "", sing_all_take=sing_all_take) is expected
+
+
+def test_allowlist_routing_ignores_whether_a_take_is_sing_all():
+    routing = PremiumSynthesisRouting("allowlist", load_config=lambda: _LISTS)
+    assert routing.is_premium("someone", "other@example.com", sing_all_take=True) is False
+    assert routing.is_premium("uid-tester", None, sing_all_take=False) is True
 
 
 def test_routing_off_never_reads_the_lists():

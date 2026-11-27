@@ -1,4 +1,8 @@
-"""Decide whether a user's synthesis jobs go to the premium (RTX) worker.
+"""Decide whether a synthesis job goes to the premium (RTX) worker.
+
+With SYNTHESIS_PREMIUM_ROUTING=sing_all, every Sing All take goes there and
+every other take stays on the standard worker: the RTX sings several parts at
+once, which is where it is faster.
 
 With SYNTHESIS_PREMIUM_ROUTING=allowlist, a user is routed there when their
 uid is in app_config/maintenance.allowedUids or their email in allowedEmails,
@@ -57,11 +61,14 @@ class PremiumSynthesisRouting:
     def enabled(self) -> bool:
         return self._routing != "off"
 
-    def is_premium(self, user_id: str, user_email: Optional[str]) -> bool:
-        """True when this user's jobs go to the premium worker.
+    def is_premium(self, user_id: str, user_email: Optional[str], *,
+                   sing_all_take: bool = False) -> bool:
+        """True when this job goes to the premium worker.
 
         If the lists cannot be read, the job goes to the standard worker.
         """
+        if self._routing == "sing_all":
+            return sing_all_take
         if self._routing != "allowlist":
             return False
         try:

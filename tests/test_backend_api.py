@@ -14092,8 +14092,8 @@ def test_a_synthesis_job_goes_to_the_premium_worker_only_for_allowlisted_users(
     monkeypatch.setattr(orchestrator, "_premium_synthesis_dispatcher", premium)
     asked = []
 
-    def is_premium(user_id, user_email):
-        asked.append((user_id, user_email))
+    def is_premium(user_id, user_email, *, sing_all_take=False):
+        asked.append((user_id, user_email, sing_all_take))
         return allowlisted
 
     monkeypatch.setattr(orchestrator, "_premium_routing", SimpleNamespace(is_premium=is_premium))
@@ -14110,11 +14110,59 @@ def test_a_synthesis_job_goes_to_the_premium_worker_only_for_allowlisted_users(
         )
     )
 
-    assert asked == [("test-user", "tester@example.com")]
+    assert asked == [("test-user", "tester@example.com", False)]
     chosen, other = (premium, standard) if allowlisted else (standard, premium)
     assert chosen.dispatched == ["job-routed"]
     assert other.dispatched == []
     assert app.state.job_store.get_job("job-routed")["dispatchRoute"] == expected_route
+
+
+@pytest.mark.parametrize(
+    ("parent", "expected_route"),
+    [
+        ({"jobId": "sing-all-1", "itemId": "item-1", "childJobId": "job-take"}, "premium"),
+        (None, "standard"),
+    ],
+)
+def test_sing_all_routing_sends_only_sing_all_takes_to_the_premium_worker(
+    client, monkeypatch, parent, expected_route
+):
+    from src.backend.premium_routing import PremiumSynthesisRouting
+
+    _, app = client
+    orchestrator = app.state.orchestrator
+    session_id = asyncio.run(app.state.sessions.create_session("test-user")).id
+    _patch_synthesis_start(monkeypatch, orchestrator, session_id)
+    standard = _FakeSynthesisDispatcher()
+    premium = _FakeSynthesisDispatcher()
+    premium.route.variant = "premium"
+    monkeypatch.setattr(orchestrator, "_synthesis_dispatcher", standard)
+    monkeypatch.setattr(orchestrator, "_premium_synthesis_dispatcher", premium)
+
+    def must_not_load():
+        raise AssertionError("sing_all routing does not read the tester lists")
+
+    monkeypatch.setattr(
+        orchestrator, "_premium_routing", PremiumSynthesisRouting("sing_all", load_config=must_not_load)
+    )
+
+    asyncio.run(
+        orchestrator._start_synthesis_job(
+            session_id,
+            {"title": "Quoted", "parts": [{"part_id": "Alto", "notes": []}]},
+            {"part_id": "Alto", "language": "en"},
+            user_id="test-user",
+            user_email="",
+            job_id="job-take",
+            billing_components=["vocal"],
+            parent=parent,
+        )
+    )
+
+    chosen, other = (premium, standard) if expected_route == "premium" else (standard, premium)
+    assert chosen.dispatched == ["job-take"]
+    assert other.dispatched == []
+    assert app.state.job_store.get_job("job-take")["dispatchRoute"] == expected_route
 
 
 def test_without_premium_routing_jobs_skip_the_allowlist(client, monkeypatch):

@@ -1256,6 +1256,7 @@ class Orchestrator:
                 billing_components=billing_components,
                 originating_turn_id=originating_turn_id,
                 enqueue=not defer_dispatch,
+                sing_all_take=parent is not None,
             )
             return SynthesisChatResponse(accepted, None)
         task = asyncio.create_task(
@@ -1655,6 +1656,7 @@ class Orchestrator:
         billing_components: Optional[List[str]],
         originating_turn_id: Optional[str],
         enqueue: bool = True,
+        sing_all_take: bool = False,
     ) -> None:
         """Save what the worker needs to run the job, then hand it to the worker.
 
@@ -1685,7 +1687,8 @@ class Orchestrator:
             spec["inputPath"] = input_path
         dispatcher = self._synthesis_dispatcher
         if self._premium_synthesis_dispatcher is not None and await asyncio.to_thread(
-            self._premium_routing.is_premium, user_id, user_email
+            functools.partial(self._premium_routing.is_premium, user_id, user_email,
+                              sing_all_take=sing_all_take)
         ):
             dispatcher = self._premium_synthesis_dispatcher
         # Stored as JSON text: Firestore cannot hold arrays nested in arrays.

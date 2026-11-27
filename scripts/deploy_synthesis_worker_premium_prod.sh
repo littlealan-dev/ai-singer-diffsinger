@@ -113,7 +113,7 @@ run_gcloud run services add-iam-policy-binding "${SERVICE}" \
   --role=roles/run.invoker
 
 printf 'Premium worker URL: %s\n' "${worker_url}"
-printf 'To route allowlisted users here, add to the API env (prod.api-cpu.env):\n'
-printf 'SYNTHESIS_PREMIUM_ROUTING=allowlist\n'
+printf 'To send Sing All takes here, add to the API env (prod.api-cpu.env):\n'
+printf 'SYNTHESIS_PREMIUM_ROUTING=sing_all   (or allowlist: only the maintenance testers)\n'
 printf 'SYNTHESIS_PREMIUM_WORKER_URL=%s\n' "${worker_url}"
 printf 'SYNTHESIS_PREMIUM_TASKS_QUEUE=projects/%s/locations/%s/queues/synthesis-jobs-premium\n' "${PROJECT}" "${REGION}"

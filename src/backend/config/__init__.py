@@ -63,8 +63,8 @@ def _dispatch_route_env(prefix: str) -> tuple[str, str, str, str]:
 def _premium_synthesis_route_env(synthesis_mode: str) -> tuple[str, str, str, str]:
     """Read and check the premium synthesis route: routing, worker URL, queue, audience."""
     routing = os.getenv("SYNTHESIS_PREMIUM_ROUTING", "off").strip().lower() or "off"
-    if routing not in {"off", "allowlist"}:
-        raise ValueError("SYNTHESIS_PREMIUM_ROUTING must be one of off, allowlist.")
+    if routing not in {"off", "allowlist", "sing_all"}:
+        raise ValueError("SYNTHESIS_PREMIUM_ROUTING must be one of off, allowlist, sing_all.")
     worker_url = os.getenv("SYNTHESIS_PREMIUM_WORKER_URL", "").strip().rstrip("/")
     tasks_queue = os.getenv("SYNTHESIS_PREMIUM_TASKS_QUEUE", "").strip()
     audience = os.getenv("SYNTHESIS_PREMIUM_WORKER_AUDIENCE", "").strip() or worker_url

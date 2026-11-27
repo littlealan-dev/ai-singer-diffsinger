@@ -85,6 +85,7 @@ const BASE_PLANS: PlanBase[] = [
       "Full commercial rights",
       "Access to all AI voices",
       "Sing All: every vocal part sung in one go",
+      "Sing All renders on a powerful GPU: about 2x-3x faster",
     ],
     badge: "Most Popular",
     price: {
