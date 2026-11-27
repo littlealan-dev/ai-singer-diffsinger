@@ -274,6 +274,8 @@ def test_a_session_becomes_a_song_at_its_first_upload(client):
     assert set(song) == {"id", "title", "title_edited", "created_at", "info"}
 
     [row] = test_client.get("/songs").json()["songs"]
+    # The upload's score version once a thumbnail is made; None where the renderer isn't installed.
+    assert row.pop("thumbnail_version") in (None, upload.json()["current_score"]["version"])
     assert row == {
         "id": session_id, "title": "Test", "created_at": song["created_at"],
         "last_active_at": row["last_active_at"], "status": "idle", "track_count": 0,

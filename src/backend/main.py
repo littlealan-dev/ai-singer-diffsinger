@@ -21,7 +21,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from google.api_core.exceptions import InvalidArgument
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, EmailStr, Field, TypeAdapter, ValidationError
 import logging
 
@@ -67,6 +67,10 @@ from src.backend.synthesis_pricing import (
 )
 from src.api.sing_all_estimate import quote_facts
 from src.backend.billing_store import has_active_paid_entitlement
+from src.backend import share_preview
+from src.backend.score_thumbnail import (
+    load_thumbnail, render_thumbnail, store_thumbnail, stored_version as stored_thumbnail_version,
+)
 from src.backend.sing_all import (
     ACTIVE_JOB_STATUSES, ENDED_ITEM_STATUSES, add_mixes_item, available_balance_from_user, build_items, choices_hash, mark_voice_ranges,
     job_from_quote, materialize_rows, progress as sing_all_progress, quote_lines,
@@ -1003,6 +1007,26 @@ def create_app() -> FastAPI:
             "player": player_payload,
         }
 
+    @app.get("/songs/{session_id}/thumbnail.png")
+    async def get_song_thumbnail(session_id: str, request: Request, size: str = "small") -> Response:
+        """The owner's score thumbnail for a My songs row. Reading it leaves the Song's place as it was."""
+        user_id = await _get_user_id_or_401(request)
+        try:
+            row = await sessions.get_song_row(session_id, user_id)
+            version = row.get("thumbnail_version")
+            if version is None:
+                version = await _song_thumbnail_version(
+                    sessions, settings, await sessions.read_shared(session_id))
+        except (KeyError, PermissionError):
+            return _song_error(404, "song_not_found", "song.not_found")
+        data = (await asyncio.to_thread(load_thumbnail, settings, sessions.session_dir(session_id),
+                                        session_id, version, "large" if size == "large" else "small")
+                if version is not None else None)
+        if data is None:
+            return _song_error(404, "song_not_found", "song.not_found")
+        return Response(content=data, media_type="image/png",
+                        headers={"Cache-Control": "private, max-age=86400"})
+
     @app.get("/songs/{session_id}/info")
     async def get_song_info(session_id: str, request: Request) -> Any:
         """The Song's info alone, for a dialog that shows it: no chat, score or signed audio,
@@ -1131,6 +1155,39 @@ def create_app() -> FastAPI:
             "player": player_payload,
             "credits": {"voices": voices},
         }
+
+    @app.get("/s/{token}", response_class=HTMLResponse)
+    async def share_link_page(token: str, request: Request) -> HTMLResponse:
+        """The app's page with the share link's preview tags, which chat apps read without JavaScript."""
+        base = settings.share_base_url
+        share_url = _share_url(settings, token)
+        tags = share_preview.generic_tags(share_url=share_url, base_url=base)
+        resolved = await resolve_share(token, request, "page")
+        if not isinstance(resolved, Response):
+            _, state = resolved
+            version = await _song_thumbnail_version(sessions, settings, state)
+            image = f"{base}/public/s/{token}/thumbnail.png?v={version}" if version is not None else None
+            tags = share_preview.song_tags(title=state.title, info=state.song_info, share_url=share_url,
+                                           image_url=image, base_url=base)
+        shell = await share_preview.app_shell(settings.app_shell_url or f"{base}/app")
+        page = (share_preview.inject(shell, tags) if shell
+                else share_preview.fallback_page(tags, app_url=f"{base}/app"))
+        return HTMLResponse(page, headers={"Cache-Control": "no-cache",
+                                           "X-Robots-Tag": "noindex, nofollow"})
+
+    @app.get("/public/s/{token}/thumbnail.png")
+    async def public_share_thumbnail(token: str, request: Request) -> Response:
+        resolved = await resolve_share(token, request, "page")
+        if isinstance(resolved, Response):
+            return resolved
+        _, state = resolved
+        version = await _song_thumbnail_version(sessions, settings, state)
+        data = (await asyncio.to_thread(load_thumbnail, settings, sessions.session_dir(state.id),
+                                        state.id, version, "large") if version is not None else None)
+        if data is None:
+            return _share_error(404, "share_off", "share.off")
+        return Response(content=data, media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
     @app.get("/public/s/{token}/score")
     async def public_share_score(token: str, request: Request) -> Response:
@@ -1524,6 +1581,9 @@ def create_app() -> FastAPI:
                     ),
                 },
             ) from exc
+        # The Song's thumbnail, for its share link preview and My songs row. Made here rather
+        # than in the background, as Cloud Run slows the CPU once the response is sent.
+        await _render_and_store_thumbnail(sessions, settings, session_id, version, canonical_musicxml_path)
         return {
             "session_id": session_id,
             "score_id": score_id,
@@ -2850,6 +2910,46 @@ def _share_url(settings: Settings, token: str) -> str:
     return f"{settings.share_base_url}/s/{token}"
 
 
+THUMBNAIL_RENDER_TIMEOUT_SECONDS = 10.0
+
+
+async def _render_and_store_thumbnail(
+    sessions: SessionStore, settings: Settings, session_id: str, version: int, musicxml_path: Path,
+) -> bool:
+    """Make a Song's score thumbnail and record its version. A failure only leaves it without one."""
+    def render() -> tuple[bytes, bytes]:
+        content = read_musicxml_content_bounded(
+            musicxml_path, max_mxl_uncompressed_bytes=settings.max_mxl_uncompressed_bytes)
+        return render_thumbnail(content)
+
+    try:
+        large, small = await asyncio.wait_for(asyncio.to_thread(render), THUMBNAIL_RENDER_TIMEOUT_SECONDS)
+        await asyncio.to_thread(store_thumbnail, settings, sessions.session_dir(session_id),
+                                session_id, version, large, small)
+        await sessions.set_thumbnail_version(session_id, version)
+        return True
+    except Exception:
+        get_logger("backend.api").exception(
+            "score_thumbnail_failed session_id=%s version=%s", session_id, version)
+        return False
+
+
+async def _song_thumbnail_version(sessions: SessionStore, settings: Settings, state: Any) -> Optional[int]:
+    """The Song's thumbnail version, rendering it first for a Song from before thumbnails."""
+    version = stored_thumbnail_version(state.files)
+    if version is not None:
+        return version
+    try:
+        path = await _active_score_path(sessions, settings, state.id, state.user_id,
+                                        state.snapshot(), touch=False)
+    except HTTPException:
+        return None
+    version = state.current_score_version
+    if not await _render_and_store_thumbnail(sessions, settings, state.id, version, path):
+        return None
+    return version
+
+
 def _share_error(status: int, code: str, message_key: str, *, retry_after: str | None = None) -> JSONResponse:
     return JSONResponse(
         status_code=status, content={"code": code, "message": backend_message(message_key)},
@@ -2857,10 +2957,11 @@ def _share_error(status: int, code: str, message_key: str, *, retry_after: str |
     )
 
 
-async def _serve_score(
+async def _active_score_path(
     sessions: SessionStore, settings: Settings, session_id: str,
     user_id: str | None, snapshot: Dict[str, Any], *, touch: bool = True,
-) -> Response:
+) -> Path:
+    """The session's current MusicXML file, as the score route and the thumbnail read it."""
     # The score's recorded source path may be another backend's disk (the
     # preprocess worker's), so it is never read here: a scored session serves
     # its active artifact, which stays inside this session's folder or comes
@@ -2882,6 +2983,14 @@ async def _serve_score(
             ) from exc
     if not score_path.is_file():
         raise HTTPException(status_code=404, detail="Score file not found.")
+    return score_path
+
+
+async def _serve_score(
+    sessions: SessionStore, settings: Settings, session_id: str,
+    user_id: str | None, snapshot: Dict[str, Any], *, touch: bool = True,
+) -> Response:
+    score_path = await _active_score_path(sessions, settings, session_id, user_id, snapshot, touch=touch)
     content = _read_musicxml_content(
         score_path,
         max_mxl_uncompressed_bytes=settings.max_mxl_uncompressed_bytes,

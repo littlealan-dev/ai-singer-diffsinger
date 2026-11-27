@@ -26,8 +26,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH=/opt/venv/bin:$PATH \
     NLTK_DATA=/opt/nltk_data
 
-# libsndfile for soundfile, libgomp for onnxruntime.
+# libsndfile for soundfile, libgomp for onnxruntime. The fonts draw Chinese, Japanese and Thai
+# text in score thumbnails; Verovio's own fonts cover the music and Latin text.
 RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 libgomp1 \
+    fonts-wqy-microhei fonts-thai-tlwg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

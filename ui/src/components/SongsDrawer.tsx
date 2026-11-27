@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
-import { ApiError, deleteSong, listSongs, type SongRow } from "../api";
+import { Music, X } from "lucide-react";
+import { ApiError, deleteSong, fetchSongThumbnail, listSongs, type SongRow } from "../api";
 import { shareDialogOpen } from "../analytics";
 import ShareSongModal, { shareBlockedReason, type ShareState } from "../share/ShareSongModal";
 import "./SongsDrawer.css";
@@ -157,14 +157,17 @@ export default function SongsDrawer({
               });
               return (
                 <li key={song.id} className="songs-drawer-row" data-testid="song-row" aria-current={isCurrent || undefined}>
-                  <div className="songs-drawer-row-copy">
-                    <span className="songs-drawer-row-title">{song.title}</span>
-                    <span className="songs-drawer-row-meta">
-                      {working ? <span className="songs-drawer-working">Working…</span> : null}
-                      <span>{lastActivityLabel(song.last_active_at, now)}</span>
-                      <span>{sungPartsLabel(song.track_count)}</span>
-                      {song.shared ? <span className="songs-drawer-shared">Shared</span> : null}
-                    </span>
+                  <div className="songs-drawer-row-main">
+                    <SongThumbnail songId={song.id} version={song.thumbnail_version ?? null} />
+                    <div className="songs-drawer-row-copy">
+                      <span className="songs-drawer-row-title">{song.title}</span>
+                      <span className="songs-drawer-row-meta">
+                        {working ? <span className="songs-drawer-working">Working…</span> : null}
+                        <span>{lastActivityLabel(song.last_active_at, now)}</span>
+                        <span>{sungPartsLabel(song.track_count)}</span>
+                        {song.shared ? <span className="songs-drawer-shared">Shared</span> : null}
+                      </span>
+                    </div>
                   </div>
                   {confirmingId === song.id ? (
                     <div className="songs-drawer-row-actions confirm">
@@ -241,5 +244,46 @@ export default function SongsDrawer({
         </div>
       ) : null}
     </div>
+  );
+}
+
+// Object URLs of thumbnails already fetched, so reopening My songs doesn't fetch them again.
+const thumbnailUrls = new Map<string, string>();
+
+/** The Song's score thumbnail, fetched when its row scrolls into view; a note icon until then. */
+function SongThumbnail({ songId, version }: { songId: string; version: number | null }) {
+  const key = version === null ? null : `${songId}:${version}`;
+  const [url, setUrl] = useState<string | null>(key ? thumbnailUrls.get(key) ?? null : null);
+  const frameRef = useRef<HTMLSpanElement | null>(null);
+
+  useEffect(() => {
+    if (!key || version === null || url) return;
+    const frame = frameRef.current;
+    if (!frame) return;
+    let cancelled = false;
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      observer.disconnect();
+      void fetchSongThumbnail(songId, version)
+        .then((blob) => {
+          const objectUrl = URL.createObjectURL(blob);
+          thumbnailUrls.set(key, objectUrl);
+          if (!cancelled) setUrl(objectUrl);
+        })
+        .catch(() => {
+          // The row keeps its note icon.
+        });
+    });
+    observer.observe(frame);
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+    };
+  }, [key, songId, url, version]);
+
+  return (
+    <span className="songs-drawer-thumbnail" ref={frameRef} aria-hidden="true">
+      {url ? <img src={url} alt="" /> : <Music size={18} />}
+    </span>
   );
 }

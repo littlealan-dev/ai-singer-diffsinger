@@ -302,6 +302,8 @@ class Settings:
     synthesis_premium_tasks_queue: str = ""
     share_links: str = "off"
     share_base_url: str = "https://sightsinger.app"
+    # The app's live page that GET /s/{token} adds link preview tags to. Empty: SHARE_BASE_URL + /app.
+    app_shell_url: str = ""
     share_page_limit_per_minute: int = 240
     share_audio_limit_per_minute: int = 1200
     # The worker service has no GPU, so it starts only the CPU MCP worker.
@@ -784,6 +786,7 @@ class Settings:
             synthesis_premium_tasks_queue=synthesis_premium_tasks_queue,
             share_links=_share_links_env(),
             share_base_url=os.getenv("SHARE_BASE_URL", "https://sightsinger.app").strip().rstrip("/"),
+            app_shell_url=os.getenv("APP_SHELL_URL", "").strip(),
             share_page_limit_per_minute=_env_int("SHARE_PAGE_LIMIT_PER_MINUTE", 240),
             share_audio_limit_per_minute=_env_int("SHARE_AUDIO_LIMIT_PER_MINUTE", 1200),
             mcp_gpu_enabled=mcp_gpu_enabled,

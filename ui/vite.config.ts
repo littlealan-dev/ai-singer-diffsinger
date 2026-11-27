@@ -78,6 +78,12 @@ export default defineConfig({
         target: "http://127.0.0.1:8000",
         changeOrigin: true,
       },
+      // A share link's page comes from the API, which adds its link preview tags to the app's
+      // page (docs/specs/share-link-preview-spec.md). A regex, so /sessions and /songs don't match.
+      "^/s/": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: false,
+      },
       "/credits": {
         target: "http://127.0.0.1:8000",
         changeOrigin: true,

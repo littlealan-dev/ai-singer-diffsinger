@@ -146,6 +146,8 @@ export type SongRow = {
   track_count: number;
   /** True while the Song's share link is on. */
   shared?: boolean;
+  /** The score version its thumbnail was made from; null before one exists. */
+  thumbnail_version?: number | null;
   /** On the answer to a Song update. */
   info?: SongInfoFields;
 };
@@ -1122,6 +1124,20 @@ export async function fetchShareScore(url: string): Promise<string> {
 
 export async function fetchShareMidi(url: string): Promise<Blob> {
   return (await fetchShareFile(url, "Failed to load instrumental MIDI.")).blob();
+}
+
+/** A My songs row's score thumbnail. A fetch, not an <img src>, so it can send the sign-in header. */
+export async function fetchSongThumbnail(songId: string, version: number): Promise<Blob> {
+  let headers = await withAppCheckHeaders();
+  headers = await withAuthHeaders(headers);
+  const response = await fetchWithTimeout(
+    `${API_BASE}/songs/${songId}/thumbnail.png?size=small&v=${version}`,
+    { headers }
+  );
+  if (!response.ok) {
+    throw await errorFromResponse(response, "Could not load the song's thumbnail.");
+  }
+  return response.blob();
 }
 
 export async function fetchShareAudio(url: string): Promise<ArrayBuffer> {

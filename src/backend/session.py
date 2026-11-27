@@ -19,6 +19,7 @@ from firebase_admin import firestore
 
 from src.backend import songs
 from src.backend.firebase_app import get_firestore_client
+from src.backend.score_thumbnail import stored_version as stored_thumbnail_version
 from src.backend.storage_client import download_bytes, upload_bytes
 
 _T = TypeVar("_T")
@@ -426,6 +427,14 @@ class SessionStore(WorkspacePersistence):
             state.files[key] = value
             state.last_active_at = _utcnow()
 
+    async def set_thumbnail_version(self, session_id: str, version: int) -> None:
+        """Record which score version the Song's thumbnail shows, leaving its activity alone."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError(session_id)
+            state.files["thumbnail_version"] = str(version)
+
     async def ensure_active_musicxml(
         self, session_id: str, user_id: Optional[str], *, touch: bool = True
     ) -> Path:
@@ -588,6 +597,7 @@ class SessionStore(WorkspacePersistence):
             "lastActiveAt": state.last_active_at, "currentJobId": state.current_job_id,
             "scoreId": state.score_id,
             "shareToken": state.share_token,
+            "files": {"thumbnail_version": state.files.get("thumbnail_version")},
         }
 
     async def get_player(self, session_id: str, user_id: Optional[str], *, shared: bool = False) -> Optional[Dict[str, Any]]:
@@ -1060,6 +1070,14 @@ class FirestoreSessionStore(WorkspacePersistence):
             session_id, lambda: self._update(session_id, {f"files.{key}": value})
         )
 
+    async def set_thumbnail_version(self, session_id: str, version: int) -> None:
+        """Record which score version the Song's thumbnail shows, leaving lastActiveAt alone:
+        a render must not move the Song up My songs."""
+        await self._run_session_io(
+            session_id,
+            lambda: self._doc_ref(session_id).update({"files.thumbnail_version": str(version)}),
+        )
+
     async def ensure_active_musicxml(
         self, session_id: str, user_id: Optional[str], *, touch: bool = True
     ) -> Path:
@@ -1393,7 +1411,8 @@ class FirestoreSessionStore(WorkspacePersistence):
                 self._client.collection(self._collection)
                 .where("userId", "==", user_id)
                 .where("songListed", "==", True)
-                .select(["title", "songCreatedAt", "lastActiveAt", "currentJobId", "scoreId", "deletedAt", "shareToken"])
+                .select(["title", "songCreatedAt", "lastActiveAt", "currentJobId", "scoreId", "deletedAt", "shareToken",
+                         "files.thumbnail_version"])
             )
             listed = [(doc.id, doc.to_dict() or {}) for doc in query.stream()]
             listed = [(sid, data) for sid, data in listed if not data.get("deletedAt")]
@@ -1441,6 +1460,8 @@ def _song_row(session_id: str, data: Dict[str, Any], player: Optional[Dict[str, 
         "current_job_id": data.get("currentJobId"),
         "track_count": len(tracks) if holds_this_score else 0,
         "shared": bool(data.get("shareToken")),
+        # The score version its thumbnail was made from: the row fetches /songs/{id}/thumbnail.png.
+        "thumbnail_version": stored_thumbnail_version(data.get("files")),
     }
 
 
