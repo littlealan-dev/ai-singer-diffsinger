@@ -1,0 +1,27 @@
+# The Sing All package job's image (Dockerfile.sing-all-package-job), built on the CPU API image.
+# The first step copies the FluidR3 soundfont from the bucket into the build folder; the image
+# then carries it. Build with scripts/build_sing_all_package_prod.sh, after
+# scripts/build_cpu_backend_prod.sh.
+steps:
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        mkdir -p /workspace/sing-all-package-context
+        cp Dockerfile.sing-all-package-job /workspace/sing-all-package-context/Dockerfile
+        gcloud storage cp "gs://${_SOUNDFONT_BUCKET}/assets/soundfonts/FluidR3_GM.sf2" \
+          /workspace/sing-all-package-context/FluidR3_GM.sf2
+        test -s /workspace/sing-all-package-context/FluidR3_GM.sf2
+  - name: gcr.io/cloud-builders/docker
+    dir: /workspace/sing-all-package-context
+    args:
+      - build
+      - --build-arg
+      - BASE_IMAGE=${_BASE_IMAGE}
+      - -t
+      - ${_IMAGE}
+      - .
+
+images:
+  - ${_IMAGE}

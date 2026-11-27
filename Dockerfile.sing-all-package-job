@@ -1,0 +1,20 @@
+# The Sing All package job (Cloud Run Job sightsinger-sing-all-package): it renders the
+# instruments, makes the mixes and the zip for one Sing All job (src/backend/sing_all_package.py).
+#
+# It starts the whole backend, as the API does, so it is built on the CPU API image (same code,
+# Python packages, NLTK data and voicebank manifests) plus what only packaging needs: the ffmpeg
+# binary (the MP3s and the limiter), the FluidSynth library (pyfluidsynth renders the MIDI) and
+# the FluidR3 soundfont, which Cloud Build copies from the bucket first (it is not in git).
+# Build it after the API image, from the same commit.
+ARG BASE_IMAGE=gcr.io/sightsinger-app/sightsinger-cpu-backend:latest
+FROM ${BASE_IMAGE}
+
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libfluidsynth3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -c "import fluidsynth"
+
+COPY FluidR3_GM.sf2 /app/soundfonts/FluidR3_GM.sf2
+ENV SING_ALL_SOUNDFONT_PATH=/app/soundfonts/FluidR3_GM.sf2
+
+# One execution per Sing All job: SING_ALL_JOB_ID is set by the run's override.
+CMD ["python3", "-m", "src.backend.sing_all_package"]
