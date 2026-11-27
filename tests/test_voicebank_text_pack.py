@@ -103,7 +103,7 @@ def voicebanks(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         voicebank_cache,
-        "_ensure_cached_voicebank",
+        "_resolve_baked_voicebank",
         lambda voicebank_id: full_loads.append(("storage", voicebank_id)) or tmp_path / "full",
     )
     monkeypatch.setattr(
@@ -233,7 +233,7 @@ def test_happy_birthday_names_are_checked_against_the_liee_text_pack_alone(monke
 
     monkeypatch.setattr(voicebank_cache, "is_prod_env", lambda: False)
     monkeypatch.setattr(voicebank_cache, "_resolve_local_voicebank", no_full_voicebank)
-    monkeypatch.setattr(voicebank_cache, "_ensure_cached_voicebank", no_full_voicebank)
+    monkeypatch.setattr(voicebank_cache, "_resolve_baked_voicebank", no_full_voicebank)
     monkeypatch.setenv("VOICEBANK_TEXT_CACHE_DIR", str(tmp_path / "voicebank-text"))
     monkeypatch.setattr(handlers, "resolve_project_path", lambda value: Path(value))
     resolved = []

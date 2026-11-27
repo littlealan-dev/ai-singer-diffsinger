@@ -108,11 +108,16 @@ Voicebank credits live in `CREDITS.md`.
 Dev (local):
 - Place voicebanks under `assets/voicebanks/`
 
+Prod:
+- The synthesis worker images carry their enabled voicebanks, baked at build time
+  (`scripts/bake_voicebanks.py`, run by Cloud Build) into `/app/voicebanks`.
+  A voicebank missing from the image fails (`voicebank_not_baked`); it is never downloaded.
+- Enabling a voicebank or replacing its archive needs a rebuild and redeploy of both worker images.
+
 Relevant env:
 ```
 VOICEBANK_BUCKET
-VOICEBANK_PREFIX=assets/voicebanks
-VOICEBANK_CACHE_DIR=/tmp/voicebanks
+BAKED_VOICEBANKS_DIR=/app/voicebanks
 ```
 
 ## MCP Server (stdio JSON-RPC)

@@ -1,28 +1,16 @@
 import os
-import tarfile
-import threading
-import time
 import unittest
 import json
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
 from src.api.voicebank_cache import (
+    VoicebankNotBakedError,
     _load_voicebank_manifest_for_path,
     resolve_manifest_phonemizer_dictionary,
     resolve_voicebank_path,
 )
-
-
-class FakeBlob:
-    def __init__(self, name: str, source_path: Path) -> None:
-        self.name = name
-        self._source_path = source_path
-
-    def download_to_filename(self, filename: str) -> None:
-        Path(filename).write_bytes(self._source_path.read_bytes())
 
 
 class TestVoicebankCache(unittest.TestCase):
@@ -36,226 +24,108 @@ class TestVoicebankCache(unittest.TestCase):
         self.assertTrue((path / "dsconfig.yaml").exists())
         self.assertIn("assets/voicebanks", str(path))
 
-    def test_prod_env_downloads_to_cache(self) -> None:
-        with TemporaryDirectory() as gcs_root, TemporaryDirectory() as cache_root:
-            gcs_root_path = Path(gcs_root)
-            cache_root_path = Path(cache_root)
-            manifest_path = gcs_root_path / "voicebank_manifest.prod.json"
-            manifest_path.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "generated_at": "2026-03-27T00:00:00Z",
-                        "voicebanks": [
-                            {
-                                "id": "TestBank",
-                                "enabled": True,
-                                "storage_object": "assets/voicebanks/TestBank.tar.gz",
-                                "name": "TestBank",
-                                "path_hint": "TestBank",
-                                "languages": [],
-                                "has_duration_model": False,
-                                "has_pitch_model": False,
-                                "has_variance_model": False,
-                                "speakers": [],
-                                "voice_colors": [],
-                                "default_voice_color": None,
-                                "sample_rate": 44100,
-                                "hop_size": 512,
-                                "use_lang_id": False,
-                                "profile_gender": None,
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            source_dir = gcs_root_path / "tmp" / "TestBank"
-            source_dir.mkdir(parents=True, exist_ok=True)
-            (source_dir / "dsconfig.yaml").write_text("sample_rate: 44100\n", encoding="utf-8")
-            (source_dir / "character.yaml").write_text("name: TestBank\n", encoding="utf-8")
-            archive_path = gcs_root_path / "assets" / "voicebanks" / "TestBank.tar.gz"
-            archive_path.parent.mkdir(parents=True, exist_ok=True)
-            with tarfile.open(archive_path, "w:gz") as tar:
-                for file_path in source_dir.rglob("*"):
-                    if file_path.is_file():
-                        tar.add(file_path, arcname=file_path.relative_to(source_dir))
-
-            def fake_list_blobs(bucket_name: str, prefix: str):
-                blobs = []
-                for file_path in gcs_root_path.rglob("*"):
-                    if not file_path.is_file():
-                        continue
-                    name = str(file_path.relative_to(gcs_root_path)).replace(os.sep, "/")
-                    if not name.startswith(prefix):
-                        continue
-                    blobs.append(FakeBlob(name, file_path))
-                return blobs
-
-            with mock.patch.dict(
-                os.environ,
+    def _write_manifest(self, path: Path, voicebanks: dict[str, bool]) -> Path:
+        path.write_text(
+            json.dumps(
                 {
-                    "APP_ENV": "prod",
-                    "VOICEBANK_BUCKET": "dummy-bucket",
-                    "VOICEBANK_PREFIX": "assets/voicebanks",
-                    "VOICEBANK_CACHE_DIR": str(cache_root_path),
-                    "VOICEBANK_MANIFEST_PATH": str(manifest_path),
-                },
-                clear=False,
-            ), mock.patch(
-                "src.api.voicebank_cache.list_blobs",
-                side_effect=fake_list_blobs,
-            ):
-                resolved = resolve_voicebank_path("TestBank")
+                    "version": 1,
+                    "voicebanks": [
+                        {
+                            "id": voicebank_id,
+                            "enabled": enabled,
+                            "storage_object": f"assets/voicebanks/{voicebank_id}.tar.gz",
+                        }
+                        for voicebank_id, enabled in voicebanks.items()
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
 
-            self.assertTrue((resolved / "dsconfig.yaml").exists())
-            self.assertIn("TestBank", str(resolved))
+    def _write_voicebank(self, root: Path) -> Path:
+        root.mkdir(parents=True)
+        (root / "dsconfig.yaml").write_text("sample_rate: 44100\n", encoding="utf-8")
+        (root / "character.yaml").write_text("name: TestBank\n", encoding="utf-8")
+        return root
 
-    def test_prod_env_downloads_once_when_processes_ask_together(self) -> None:
-        # A GPU worker pool on a cold instance: every process asks for the same
-        # voicebank at once. One downloads it; the others wait and reuse it.
-        # Each thread opens the lock file itself, as a separate process would.
-        with TemporaryDirectory() as gcs_root, TemporaryDirectory() as cache_root:
-            gcs_root_path = Path(gcs_root)
-            manifest_path = gcs_root_path / "voicebank_manifest.prod.json"
-            manifest_path.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "voicebanks": [
-                            {
-                                "id": "TestBank",
-                                "enabled": True,
-                                "storage_object": "assets/voicebanks/TestBank.tar.gz",
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            source_dir = gcs_root_path / "tmp" / "TestBank"
-            (source_dir / "dsvocoder").mkdir(parents=True)
-            (source_dir / "dsconfig.yaml").write_text("sample_rate: 44100\n", encoding="utf-8")
-            (source_dir / "character.yaml").write_text("name: TestBank\n", encoding="utf-8")
-            (source_dir / "dsvocoder" / "vocoder.yaml").write_text("name: vocoder\n", encoding="utf-8")
-            archive_path = gcs_root_path / "assets" / "voicebanks" / "TestBank.tar.gz"
-            archive_path.parent.mkdir(parents=True)
-            with tarfile.open(archive_path, "w:gz") as tar:
-                tar.add(source_dir, arcname="TestBank")
+    def _resolve_in_prod(self, manifest_path: Path, baked_root: Path, voicebank_id: str) -> Path:
+        # Prod must never reach Cloud Storage for a full voicebank.
+        with mock.patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "prod",
+                "VOICEBANK_BUCKET": "dummy-bucket",
+                "BAKED_VOICEBANKS_DIR": str(baked_root),
+                "VOICEBANK_MANIFEST_PATH": str(manifest_path),
+            },
+            clear=False,
+        ), mock.patch(
+            "src.backend.storage_client.get_storage_client",
+            side_effect=AssertionError("reached Cloud Storage"),
+        ), mock.patch(
+            "src.api.voicebank_cache.get_bucket",
+            side_effect=AssertionError("reached Cloud Storage"),
+        ):
+            return resolve_voicebank_path(voicebank_id)
 
-            downloads = []
+    def test_prod_env_reads_baked_voicebank(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            manifest_path = self._write_manifest(tmp / "manifest.json", {"TestBank": True})
+            baked = self._write_voicebank(tmp / "baked" / "TestBank")
 
-            class SlowBlob(FakeBlob):
-                def download_to_filename(self, filename: str) -> None:
-                    downloads.append(filename)
-                    time.sleep(0.2)
-                    super().download_to_filename(filename)
+            with self.assertLogs("src.api.voicebank_cache", level="INFO") as logs:
+                resolved = self._resolve_in_prod(manifest_path, tmp / "baked", "TestBank")
 
-            def fake_list_blobs(bucket_name: str, prefix: str):
-                return [SlowBlob("assets/voicebanks/TestBank.tar.gz", archive_path)]
+            self.assertEqual(resolved, baked)
+            self.assertTrue(any("voicebank_baked_hit voicebank=TestBank" in line for line in logs.output))
 
-            start = threading.Barrier(4)
+    def test_prod_env_reads_nested_baked_voicebank(self) -> None:
+        # An archive with its own top folder bakes to <id>/<top folder>/.
+        with TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            manifest_path = self._write_manifest(tmp / "manifest.json", {"NestedBank": True})
+            nested = self._write_voicebank(tmp / "baked" / "NestedBank" / "configs")
+            (nested / "dsvocoder").mkdir()
+            (nested / "dsvocoder" / "dsconfig.yaml").write_text("name: vocoder\n", encoding="utf-8")
 
-            def resolve(_: int) -> Path:
-                start.wait()
-                return resolve_voicebank_path("TestBank")
+            resolved = self._resolve_in_prod(manifest_path, tmp / "baked", "NestedBank")
 
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "APP_ENV": "prod",
-                    "VOICEBANK_BUCKET": "dummy-bucket",
-                    "VOICEBANK_CACHE_DIR": cache_root,
-                    "VOICEBANK_MANIFEST_PATH": str(manifest_path),
-                },
-                clear=False,
-            ), mock.patch(
-                "src.api.voicebank_cache.list_blobs",
-                side_effect=fake_list_blobs,
-            ), ThreadPoolExecutor(max_workers=4) as pool:
-                resolved = list(pool.map(resolve, range(4)))
+            self.assertEqual(resolved, nested)
 
-            self.assertEqual(len(downloads), 1)
-            self.assertEqual(len(set(resolved)), 1)
-            self.assertTrue((resolved[0] / "dsconfig.yaml").is_file())
-            self.assertTrue((resolved[0] / "dsvocoder" / "vocoder.yaml").is_file())
-            leftovers = [path.name for path in Path(cache_root).iterdir() if path.name.endswith(".tmp")]
-            self.assertEqual(leftovers, [])
+    def test_prod_env_fails_loudly_when_voicebank_is_not_baked(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            manifest_path = self._write_manifest(tmp / "manifest.json", {"TestBank": True, "OtherBank": True})
+            self._write_voicebank(tmp / "baked" / "OtherBank")
 
-    def test_prod_env_downloads_nested_voicebank_to_cache(self) -> None:
-        with TemporaryDirectory() as gcs_root, TemporaryDirectory() as cache_root:
-            gcs_root_path = Path(gcs_root)
-            cache_root_path = Path(cache_root)
-            manifest_path = gcs_root_path / "voicebank_manifest.prod.json"
-            manifest_path.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "generated_at": "2026-03-27T00:00:00Z",
-                        "voicebanks": [
-                            {
-                                "id": "NestedBank",
-                                "enabled": True,
-                                "storage_object": "assets/voicebanks/NestedBank.tar.gz",
-                                "name": "Nested Bank",
-                                "path_hint": "NestedBank/configs",
-                                "languages": [],
-                                "has_duration_model": False,
-                                "has_pitch_model": False,
-                                "has_variance_model": False,
-                                "speakers": [],
-                                "voice_colors": [],
-                                "default_voice_color": None,
-                                "sample_rate": 44100,
-                                "hop_size": 512,
-                                "use_lang_id": False,
-                                "profile_gender": None,
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            source_dir = gcs_root_path / "tmp" / "NestedBank" / "configs"
-            source_dir.mkdir(parents=True, exist_ok=True)
-            (source_dir / "dsconfig.yaml").write_text("sample_rate: 44100\n", encoding="utf-8")
-            (source_dir / "character.yaml").write_text("name: Nested Bank\n", encoding="utf-8")
-            archive_path = gcs_root_path / "assets" / "voicebanks" / "NestedBank.tar.gz"
-            archive_path.parent.mkdir(parents=True, exist_ok=True)
-            with tarfile.open(archive_path, "w:gz") as tar:
-                for file_path in (gcs_root_path / "tmp" / "NestedBank").rglob("*"):
-                    if file_path.is_file():
-                        tar.add(file_path, arcname=file_path.relative_to(gcs_root_path / "tmp" / "NestedBank"))
+            with self.assertLogs("src.api.voicebank_cache", level="ERROR") as logs:
+                with self.assertRaises(VoicebankNotBakedError) as raised:
+                    self._resolve_in_prod(manifest_path, tmp / "baked", "TestBank")
 
-            def fake_list_blobs(bucket_name: str, prefix: str):
-                blobs = []
-                for file_path in gcs_root_path.rglob("*"):
-                    if not file_path.is_file():
-                        continue
-                    name = str(file_path.relative_to(gcs_root_path)).replace(os.sep, "/")
-                    if not name.startswith(prefix):
-                        continue
-                    blobs.append(FakeBlob(name, file_path))
-                return blobs
+            self.assertIsInstance(raised.exception, FileNotFoundError)
+            self.assertIn("TestBank", str(raised.exception))
+            self.assertTrue(any("voicebank_not_baked voicebank=TestBank" in line for line in logs.output))
 
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "APP_ENV": "prod",
-                    "VOICEBANK_BUCKET": "dummy-bucket",
-                    "VOICEBANK_PREFIX": "assets/voicebanks",
-                    "VOICEBANK_CACHE_DIR": str(cache_root_path),
-                    "VOICEBANK_MANIFEST_PATH": str(manifest_path),
-                },
-                clear=False,
-            ), mock.patch(
-                "src.api.voicebank_cache.list_blobs",
-                side_effect=fake_list_blobs,
-            ):
-                resolved = resolve_voicebank_path("NestedBank")
+    def test_prod_env_fails_when_baked_folder_has_no_dsconfig(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            manifest_path = self._write_manifest(tmp / "manifest.json", {"TestBank": True})
+            (tmp / "baked" / "TestBank").mkdir(parents=True)
+            (tmp / "baked" / "TestBank" / "character.yaml").write_text("name: TestBank\n", encoding="utf-8")
 
-            self.assertEqual(resolved.resolve(), (cache_root_path / "NestedBank" / "configs").resolve())
-            self.assertTrue((resolved / "dsconfig.yaml").exists())
+            with self.assertRaises(VoicebankNotBakedError):
+                self._resolve_in_prod(manifest_path, tmp / "baked", "TestBank")
+
+    def test_prod_env_still_refuses_voicebank_not_in_manifest(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            manifest_path = self._write_manifest(tmp / "manifest.json", {"OtherBank": True})
+            self._write_voicebank(tmp / "baked" / "TestBank")
+
+            with self.assertRaisesRegex(FileNotFoundError, "not declared in manifest"):
+                self._resolve_in_prod(manifest_path, tmp / "baked", "TestBank")
 
     def test_dev_env_resolves_nested_manifest_voicebank_root(self) -> None:
         with TemporaryDirectory() as tmp_dir:
@@ -315,7 +185,7 @@ class TestVoicebankCache(unittest.TestCase):
                 {
                     "APP_ENV": "prod",
                     "VOICEBANK_BUCKET": "dummy-bucket",
-                    "VOICEBANK_CACHE_DIR": str(Path(cache_root)),
+                    "BAKED_VOICEBANKS_DIR": str(Path(cache_root)),
                     "VOICEBANK_MANIFEST_PATH": str(Path(cache_root) / "missing.json"),
                 },
                 clear=False,

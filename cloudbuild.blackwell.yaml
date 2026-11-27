@@ -1,4 +1,18 @@
+# The premium (RTX PRO 6000 Blackwell) synthesis worker image
+# (Dockerfile.blackwell). The first step bakes the enabled voicebanks into
+# baked_voicebanks/, which the Dockerfile copies to /app/voicebanks. Build with
+# scripts/build_synthesis_worker_blackwell_prod.sh.
 steps:
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: python3
+    args:
+      - scripts/bake_voicebanks.py
+      - --manifest
+      - env/voicebank_manifest.prod.json
+      - --bucket
+      - ${_VOICEBANK_BUCKET}
+      - --out
+      - baked_voicebanks
   - name: gcr.io/cloud-builders/docker
     args:
       - build
@@ -10,3 +24,5 @@ steps:
 
 images:
   - ${_BLACKWELL_IMAGE}
+
+timeout: 3600s

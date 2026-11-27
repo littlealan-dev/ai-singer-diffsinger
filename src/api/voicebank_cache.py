@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-"""Helpers for resolving and caching voicebanks locally or from storage."""
+"""Helpers for resolving voicebanks: baked into the image in prod, local assets otherwise.
+
+Text packs (a voicebank's text and config files, no models) come from storage in prod."""
 
 from functools import lru_cache
-import fcntl
 import json
 import math
 from pathlib import Path
@@ -17,7 +18,7 @@ import yaml
 
 from google.api_core.exceptions import NotFound
 
-from src.backend.storage_client import get_bucket, list_blobs
+from src.backend.storage_client import get_bucket
 from src.mcp.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -584,9 +585,9 @@ def _voicebank_prefix() -> str:
     return prefix.strip().strip("/")
 
 
-def _cache_root() -> Path:
-    """Return the cache directory for downloaded voicebanks."""
-    return Path(os.getenv("VOICEBANK_CACHE_DIR", "/tmp/voicebanks"))
+def _baked_voicebanks_root() -> Path:
+    """Return the directory the prod image's voicebanks are baked into."""
+    return Path(os.getenv("BAKED_VOICEBANKS_DIR", "/app/voicebanks"))
 
 
 def _stage_subdir(stage: str) -> Optional[str]:
@@ -731,10 +732,10 @@ def _check_voicebank_id(voicebank_id: str) -> None:
 
 
 def resolve_voicebank_path(voicebank_id: str) -> Path:
-    """Resolve a voicebank ID to a local path, caching in prod if needed."""
+    """Resolve a voicebank ID to a local path: baked into the image in prod, local assets otherwise."""
     _check_voicebank_id(voicebank_id)
     if is_prod_env():
-        return _ensure_cached_voicebank(voicebank_id)
+        return _resolve_baked_voicebank(voicebank_id)
     return _resolve_local_voicebank(voicebank_id)
 
 
@@ -807,96 +808,43 @@ def _list_voicebank_ids_gcs() -> List[str]:
     )
 
 
-def _ensure_cached_voicebank(voicebank_id: str) -> Path:
-    """Download and extract a voicebank archive into the local cache.
+def _resolve_baked_voicebank(voicebank_id: str) -> Path:
+    """Return a voicebank baked into the image, failing loudly when it is not.
 
-    Several MCP processes on one instance may need the same voicebank at once
-    (a GPU worker pool on a cold instance). One downloads it under a file lock;
-    the others wait for the lock and then find it cached, so no process removes
-    files another is writing or reading.
+    Prod images carry their enabled voicebanks already extracted (the build
+    downloads them; src/api/check_baked_voicebanks.py fails the build when one
+    is missing), so nothing is downloaded at run time.
     """
-    cache_root = _cache_root()
-    target_dir = cache_root / voicebank_id
-    resolved_cached = _cached_voicebank_root(voicebank_id, target_dir)
-    if resolved_cached is not None:
-        return resolved_cached
-
-    cache_root.mkdir(parents=True, exist_ok=True)
-    wait_start = time.monotonic()
-    # flock locks belong to the open file, so threads and processes that open
-    # the lock file separately all wait for each other.
-    with open(cache_root / f".{voicebank_id}.lock", "w") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        wait_ms = (time.monotonic() - wait_start) * 1000.0
-        resolved_cached = _cached_voicebank_root(voicebank_id, target_dir)
-        if resolved_cached is not None:
-            logger.info("voicebank_cache_waited voicebank=%s elapsed_ms=%.2f", voicebank_id, wait_ms)
-            return resolved_cached
-        return _download_voicebank(voicebank_id, cache_root, target_dir)
+    baked_root = _baked_voicebanks_root()
+    resolved = _baked_voicebank_root(baked_root, voicebank_id)
+    if resolved is None:
+        logger.error("voicebank_not_baked voicebank=%s dir=%s", voicebank_id, baked_root)
+        raise VoicebankNotBakedError(voicebank_id, baked_root)
+    logger.info("voicebank_baked_hit voicebank=%s path=%s", voicebank_id, resolved)
+    return resolved
 
 
-def _cached_voicebank_root(voicebank_id: str, target_dir: Path) -> Optional[Path]:
-    """Return the cached voicebank's root, or None when it is not cached."""
-    resolved_cached = discover_voicebank_root(target_dir) if target_dir.exists() else None
-    if resolved_cached is not None:
-        logger.info("voicebank_cache_hit voicebank=%s path=%s", voicebank_id, resolved_cached)
-    return resolved_cached
+def _baked_voicebank_root(baked_root: Path, voicebank_id: str) -> Optional[Path]:
+    """Return a baked voicebank's root under baked_root, or None when it is not there."""
+    candidate = baked_root / voicebank_id
+    return discover_voicebank_root(candidate) if candidate.is_dir() else None
 
 
-def _download_voicebank(voicebank_id: str, cache_root: Path, target_dir: Path) -> Path:
-    """Download and extract a voicebank into target_dir; the caller holds its lock."""
-    start_total = time.monotonic()
-    bucket = _voicebank_bucket()
-    if not bucket:
-        raise ValueError("VOICEBANK_BUCKET or STORAGE_BUCKET is required in prod.")
-    manifest_entry = get_manifest_voicebank_metadata(voicebank_id)
-    archive_object = manifest_entry.get("storage_object") if isinstance(manifest_entry, dict) else None
-    if not isinstance(archive_object, str) or not archive_object.strip():
-        raise ValueError(f"Manifest entry missing storage_object for voicebank: {voicebank_id}")
-    archive_name = Path(archive_object).name
-    blob = None
-    for candidate in list_blobs(bucket, prefix=archive_object):
-        if candidate.name == archive_object:
-            blob = candidate
-            break
-    if blob is None:
-        raise FileNotFoundError(f"Voicebank not found in storage: {voicebank_id}")
+def missing_baked_voicebanks(manifest_path: Path, baked_root: Path) -> List[str]:
+    """Return the manifest's enabled voicebank IDs that are not baked into baked_root."""
+    return [
+        str(entry["id"])
+        for entry in _load_voicebank_manifest_for_path(str(Path(manifest_path).resolve()))["voicebanks"]
+        if entry.get("enabled") is True and _baked_voicebank_root(baked_root, str(entry["id"])) is None
+    ]
 
-    tmp_dir = cache_root / f".{voicebank_id}.tmp"
-    if tmp_dir.exists():
-        # Clean up any previous partial download.
-        shutil.rmtree(tmp_dir)
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    archive_path = tmp_dir / archive_name
-    download_start = time.monotonic()
-    blob.download_to_filename(str(archive_path))
-    download_ms = (time.monotonic() - download_start) * 1000.0
-    logger.info(
-        "voicebank_downloaded voicebank=%s bytes=%s elapsed_ms=%.2f",
-        voicebank_id,
-        archive_path.stat().st_size if archive_path.exists() else "-",
-        download_ms,
-    )
-    extract_start = time.monotonic()
-    _extract_tarball(archive_path, tmp_dir)
-    extract_ms = (time.monotonic() - extract_start) * 1000.0
-    logger.info("voicebank_extracted voicebank=%s elapsed_ms=%.2f", voicebank_id, extract_ms)
 
-    resolved_tmp = discover_voicebank_root(tmp_dir)
-    if resolved_tmp is None:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise FileNotFoundError(f"Voicebank missing dsconfig.yaml: {voicebank_id}")
+class VoicebankNotBakedError(FileNotFoundError):
+    """A voicebank the manifest declares is not in this image: rebuild the image."""
 
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    target_dir.parent.mkdir(parents=True, exist_ok=True)
-    tmp_dir.replace(target_dir)
-    total_ms = (time.monotonic() - start_total) * 1000.0
-    logger.info("voicebank_cached voicebank=%s elapsed_ms=%.2f", voicebank_id, total_ms)
-    resolved_target = discover_voicebank_root(target_dir)
-    if resolved_target is None:
-        raise FileNotFoundError(f"Voicebank missing dsconfig.yaml after cache move: {voicebank_id}")
-    return resolved_target
+    def __init__(self, voicebank_id: str, baked_root: Path) -> None:
+        super().__init__(f"Voicebank {voicebank_id} is not baked into this image ({baked_root}); rebuild the image.")
+        self.baked_root = baked_root
 
 
 class VoicebankTextPackMissingError(FileNotFoundError):

@@ -36,6 +36,11 @@ ENV NLTK_DATA=/root/nltk_data
 COPY env/voicebank_manifest.dev.json /app/env/voicebank_manifest.dev.json
 COPY env/voicebank_manifest.prod.json /app/env/voicebank_manifest.prod.json
 COPY bundled_assets/vocoders/pc_nsf_hifigan_44.1k /app/assets/vocoders/pc_nsf_hifigan_44.1k
+# The enabled voicebanks, baked by Cloud Build (scripts/bake_voicebanks.py):
+# prod reads them here and never downloads one.
+COPY baked_voicebanks /app/voicebanks
+ENV BAKED_VOICEBANKS_DIR=/app/voicebanks
 COPY src /app/src
+RUN python3 -m src.api.check_baked_voicebanks env/voicebank_manifest.prod.json /app/voicebanks
 
 CMD ["python3", "-m", "src.backend.server", "--host", "0.0.0.0", "--port", "8080", "--log-level", "debug", "--access-log"]
