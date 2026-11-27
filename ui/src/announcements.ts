@@ -16,7 +16,7 @@ export const ANNOUNCEMENTS: Announcement[] = [
   {
     id: 'version_2_0_0',
     title: 'SightSinger 2.0.0 Update',
-    content: '- **Sing All**: one click sings every part of your score, then packs full mixes and part-dominant mixes, in lyrics and solfège, into one download. Included in every paid plan.\n\n- **My Songs**: every score you upload is kept as a Song with its takes. Open any of them from My songs and carry on where you left off.\n\n- **Share a song**: send one link, and anyone can listen to the sung parts and follow the score, no sign-in needed.',
+    content: '- **Sing All**: every part sung in one click, mixes in one zip.\n\n- **My Songs**: all your scores and takes are saved in one place.\n\n- **Share a song**: one link to listen and follow the score.',
     effect: 'none',
     date: '2026-11-27',
     effectiveFrom: '2026-11-27',
