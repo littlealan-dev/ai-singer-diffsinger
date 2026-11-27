@@ -2,16 +2,16 @@
 # the enabled voicebanks into baked_voicebanks/, which the Dockerfile copies to
 # /app/voicebanks. Build with scripts/build_backend_prod.sh.
 steps:
+  # The Cloud SDK image has no python3 on its PATH (since SDK 594): use the Python that gcloud
+  # itself runs on. ($$ is a literal $ in Cloud Build; ${_VOICEBANK_BUCKET} is the substitution.)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    entrypoint: python3
+    entrypoint: bash
     args:
-      - scripts/bake_voicebanks.py
-      - --manifest
-      - env/voicebank_manifest.prod.json
-      - --bucket
-      - ${_VOICEBANK_BUCKET}
-      - --out
-      - baked_voicebanks
+      - -c
+      - |
+        PY="$$(command -v python3 || echo /usr/lib/google-cloud-sdk/platform/bundledpythonunix/bin/python3)"
+        exec "$$PY" scripts/bake_voicebanks.py --manifest env/voicebank_manifest.prod.json \
+          --bucket "${_VOICEBANK_BUCKET}" --out baked_voicebanks
   - name: gcr.io/cloud-builders/docker
     args:
       - build

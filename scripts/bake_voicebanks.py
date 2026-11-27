@@ -4,8 +4,8 @@
 Cloud Build runs this before the Docker build of each synthesis worker image;
 the Dockerfile copies the output folder to /app/voicebanks, where the worker
 reads voicebanks in prod instead of downloading them. Standard library only:
-it runs in the Cloud SDK image, which has python3 and gcloud but not the app's
-packages.
+it runs in the Cloud SDK image, on the Python that gcloud ships with (the image
+has no python3 on its PATH), with gcloud but none of the app's packages.
 
     bake_voicebanks.py --manifest env/voicebank_manifest.prod.json --bucket <bucket> --out baked_voicebanks
     bake_voicebanks.py --manifest <manifest> --source-dir <folder of archives> --out <dir>   # no network (tests)
