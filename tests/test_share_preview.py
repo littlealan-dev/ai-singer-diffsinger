@@ -310,3 +310,20 @@ def test_only_the_owner_gets_a_song_thumbnail(client_with_env, firestore_emulato
     _upload_score(http, sid, content=FIXTURE.read_bytes())
     app.state.sessions._sessions[sid].user_id = "made-up-other-user"
     assert http.get(f"/songs/{sid}/thumbnail.png").status_code == 404
+
+
+@pytest.mark.parametrize("client_with_env", [{"SHARE_LINKS": "on", "BACKEND_REQUIRE_APP_CHECK": "true"}],
+                         indirect=True)
+def test_share_page_and_preview_image_need_no_app_check(client_with_env, firestore_emulator, monkeypatch):
+    # A browser opening the link, or a chat app fetching its preview, can't send App Check.
+    monkeypatch.setattr("src.backend.main.initialize_firebase_app", lambda: None)
+    _share_firestore(monkeypatch)
+    _shell(monkeypatch)
+    http, _ = client_with_env
+    token = "AAAAAAAAAAAAAAAAAAAAAA"
+    assert http.get(f"/s/{token}").status_code == 200
+    assert http.get(f"/public/s/{token}/thumbnail.png").status_code == 404  # an unknown link, not 401
+    # The page's data, score and audio are fetched by the app, which sends App Check.
+    assert http.get(f"/public/s/{token}").status_code == 401
+    assert http.get(f"/public/s/{token}/score").status_code == 401
+    assert http.post(f"/s/{token}").status_code == 401

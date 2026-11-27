@@ -3949,6 +3949,13 @@ def _should_require_app_check(request: Request) -> bool:
     if path.startswith(("/internal/preprocess-jobs/", "/internal/synthesis-jobs/",
                         "/internal/sing-all/reconcile", "/internal/sing-all/sweep")):
         return False
+    # A share link's page and its preview image are opened by a browser or a link-preview
+    # fetcher (WhatsApp, Slack), which can't send App Check; both refuse a link that's off.
+    if request.method == "GET" and (
+        (path.startswith("/s/") and path.count("/") == 2)
+        or (path.startswith("/public/s/") and path.endswith("/thumbnail.png"))
+    ):
+        return False
     return not (path.startswith("/sessions/") and path.endswith("/audio"))
 
 
