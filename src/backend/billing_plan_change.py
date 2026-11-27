@@ -14,7 +14,12 @@ import stripe
 from google.cloud import firestore
 
 from src.backend.billing_config import BillingConfig, get_billing_config, get_stripe_v1_client
-from src.backend.billing_plans import get_plan, get_plan_for_price_id, is_on_sale_plan
+from src.backend.billing_plans import (
+    annual_promo_coupon,
+    get_plan,
+    get_plan_for_price_id,
+    is_on_sale_plan,
+)
 from src.backend.billing_portal import portal_return_url
 from src.backend.billing_store import get_billing_state
 from src.backend.billing_subscription_sync import (
@@ -78,6 +83,14 @@ def create_plan_change_session(
     ):
         raise BillingHttpError(400, "That's your current plan.")
 
+    update_confirm: dict[str, Any] = {
+        "subscription": subscription["id"],
+        "items": [{"id": item["id"], "price": target.stripe_price_id, "quantity": 1}],
+    }
+    coupon = annual_promo_coupon(target, billing_config)
+    if coupon and _applies_now(item.get("price") or {}, target, current, client):
+        # A booked change gets no coupon: it would land on the current plan's next invoice.
+        update_confirm["discounts"] = [{"coupon": coupon}]
     try:
         session = client.billing_portal.sessions.create(
             params={
@@ -87,10 +100,7 @@ def create_plan_change_session(
                 "return_url": portal_return_url(billing_config, return_path),
                 "flow_data": {
                     "type": "subscription_update_confirm",
-                    "subscription_update_confirm": {
-                        "subscription": subscription["id"],
-                        "items": [{"id": item["id"], "price": target.stripe_price_id, "quantity": 1}],
-                    },
+                    "subscription_update_confirm": update_confirm,
                     "after_completion": {
                         "type": "redirect",
                         "redirect": {"return_url": portal_return_url(billing_config, return_path, change="done")},
@@ -103,6 +113,24 @@ def create_plan_change_session(
         logger.error("plan_change_portal_refused plan=%s error=%s", target.key, exc)
         raise BillingHttpError(409, "That plan change isn't available right now. Please contact support.") from exc
     return str(session.url)
+
+
+def _applies_now(current_price: dict[str, Any], target: Any, current: Any, client: Any) -> bool:
+    """Whether Stripe's portal applies a change to an annual plan now rather than at renewal.
+
+    The same rule as the cards (shared/billingPlans.ts getPlanChangeKind): the same plan moving to
+    annual, or a plan dearer per month, applies now; a cheaper plan per month waits for renewal.
+    """
+    if current is not None and current.family == target.family:
+        return True
+    target_price = _to_plain_dict(client.prices.retrieve(target.stripe_price_id))
+    return _monthly_cents(target_price) > _monthly_cents(current_price)
+
+
+def _monthly_cents(price: dict[str, Any]) -> float:
+    amount = float(price.get("unit_amount") or 0)
+    interval = (price.get("recurring") or {}).get("interval")
+    return amount / 12 if interval == "year" else amount
 
 
 def cancel_scheduled_change(

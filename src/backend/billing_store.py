@@ -12,7 +12,9 @@ from src.backend.billing_refresh import compute_next_monthly_refresh
 from src.backend.billing_types import BillingState, PlanKey
 from src.backend.firebase_app import get_firestore_client
 
-ACTIVE_PAID_STATUSES = {"active", "past_due", "unpaid", "incomplete"}
+# A subscriber whose latest payment failed (past_due, unpaid) keeps paid features; "incomplete" is
+# a subscription whose first payment never succeeded, so it never counts as paid.
+ACTIVE_PAID_STATUSES = {"active", "past_due", "unpaid"}
 
 
 def get_user_data(uid: str) -> dict[str, Any]:

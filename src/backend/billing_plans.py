@@ -3,6 +3,7 @@ from __future__ import annotations
 """Plan catalog and Stripe price mapping for billing."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from src.backend.billing_config import BillingConfig
 from src.backend.billing_types import BillingInterval, PlanFamily, PlanKey
@@ -132,6 +133,18 @@ def is_on_sale_plan(plan_key: PlanKey, config: BillingConfig) -> bool:
     if plan.family == "choir" and not plan.is_early_supporter:
         return not config.choir_early_supporter_enabled
     return True
+
+
+def annual_promo_coupon(
+    plan: PlanDefinition, config: BillingConfig, *, now: datetime | None = None
+) -> str | None:
+    """The sale coupon for a Pro or Max annual plan while the sale is on, else None."""
+    if not config.annual_promo_coupon_id or config.annual_promo_ends_at is None:
+        return None
+    if plan.family not in {"choir", "max"} or plan.billing_interval != "year":
+        return None
+    current = now or datetime.now(timezone.utc)
+    return config.annual_promo_coupon_id if current < config.annual_promo_ends_at else None
 
 
 def get_plan_for_price_id(price_id: str, config: BillingConfig) -> PlanDefinition | None:

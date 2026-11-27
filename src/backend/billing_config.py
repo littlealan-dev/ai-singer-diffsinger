@@ -3,6 +3,7 @@ from __future__ import annotations
 """Environment-backed Stripe billing configuration."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -15,6 +16,15 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None or value == "":
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_datetime(name: str) -> datetime | None:
+    """An ISO 8601 time, e.g. 2026-12-01T00:00:00Z; a time without a zone is UTC."""
+    value = (os.getenv(name) or "").strip()
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -62,6 +72,10 @@ class BillingConfig:
     portal_return_url: str
     portal_configuration_id: str
     stripe_api_version: str
+    # A sale on the Pro and Max annual plans: a Stripe coupon applied until ends_at (spec: Black
+    # Friday 2026). Without both, there is no sale.
+    annual_promo_coupon_id: str = ""
+    annual_promo_ends_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -192,6 +206,8 @@ def get_billing_config() -> BillingConfig:
         portal_return_url=_required_env("STRIPE_PORTAL_RETURN_URL"),
         portal_configuration_id=_required_env("STRIPE_PORTAL_CONFIGURATION_ID"),
         stripe_api_version=os.getenv("STRIPE_API_VERSION", "2026-11-18.endive").strip(),
+        annual_promo_coupon_id=_optional_env("ANNUAL_PROMO_COUPON_ID"),
+        annual_promo_ends_at=_env_datetime("ANNUAL_PROMO_ENDS_AT"),
     )
 
 

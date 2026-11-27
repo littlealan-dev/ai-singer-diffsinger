@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.backend.billing_config import BillingConfig, get_billing_config, get_stripe_v1_client
-from src.backend.billing_plans import get_plan, is_selectable_paid_plan
+from src.backend.billing_plans import annual_promo_coupon, get_plan, is_selectable_paid_plan
 from src.backend.billing_store import (
     get_billing_state,
     has_active_paid_entitlement,
@@ -65,6 +65,7 @@ def create_checkout_session(
                 "firebaseUserId": uid,
                 "planKey": plan_key,
             },
+            **_promo_discounts(plan, billing_config),
         },
     )
     persist_checkout_session(
@@ -126,6 +127,7 @@ def create_embedded_subscription_checkout_session(
                 "planKey": plan_key,
                 "checkoutUiMode": "embedded",
             },
+            **_promo_discounts(plan, billing_config),
         },
     )
     client_secret = _object_get(session, "client_secret")
@@ -147,3 +149,9 @@ def _object_get(value: Any, key: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(key, default)
     return getattr(value, key, default)
+
+
+def _promo_discounts(plan: Any, config: BillingConfig) -> dict[str, Any]:
+    """Stripe's discounts for a checkout: the sale coupon on a Pro or Max annual plan, if on sale."""
+    coupon = annual_promo_coupon(plan, config)
+    return {"discounts": [{"coupon": coupon}]} if coupon else {}

@@ -16,11 +16,16 @@ from src.backend.billing_plan_change import (
     create_plan_change_session,
     scheduled_change_from_schedule,
 )
-from src.backend.billing_plans import is_selectable_paid_plan
+import src.backend.billing_plans as billing_plans_module
+from src.backend.billing_plans import annual_promo_coupon, get_plan, is_selectable_paid_plan
 from src.backend.billing_types import BillingHttpError
 from src.backend.billing_portal import create_portal_session
 from src.backend.billing_refresh import apply_due_refresh, compute_next_monthly_refresh, run_credit_refresh
-from src.backend.billing_store import get_billing_state, revert_subscription_to_free
+from src.backend.billing_store import (
+    get_billing_state,
+    has_active_paid_entitlement,
+    revert_subscription_to_free,
+)
 from src.backend.billing_subscription_sync import sync_current_subscription
 from src.backend.billing_topup import (
     cancel_topup_checkout_session,
@@ -100,6 +105,9 @@ class _FakeStripeClient:
         self.v1.billing_portal.sessions.create = self._create_portal_session
         self.v1.subscriptions.retrieve = self._retrieve_subscription
         self.v1.subscriptions.list = self._list_subscriptions
+        self.prices = {}
+        self.v1.prices = type("PricesApi", (), {})()
+        self.v1.prices.retrieve = lambda price_id, params=None: self.prices[price_id]
 
     def _create_customer(self, *, params):
         self.created_customers.append(params)
@@ -293,9 +301,69 @@ def test_create_embedded_subscription_checkout_session_disables_redirects():
     assert params["metadata"]["checkoutUiMode"] == "embedded"
 
 
+@pytest.mark.parametrize(
+    ("billing", "expected"),
+    [
+        ({"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "active"}, True),
+        # A subscriber whose latest payment failed keeps paid features while Stripe retries, and after.
+        ({"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "past_due"}, True),
+        ({"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "unpaid"}, True),
+        # The first payment never succeeded: never paid.
+        ({"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "incomplete"}, False),
+        ({"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "trialing"}, False),
+        ({"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "canceled"}, False),
+        ({"activePlanKey": "solo_monthly", "billingInterval": "none", "stripeSubscriptionStatus": "active"}, False),
+        ({"activePlanKey": "free", "billingInterval": "none", "stripeSubscriptionStatus": None}, False),
+        (None, False),
+    ],
+)
+def test_who_counts_as_an_active_paid_user(billing, expected):
+    assert has_active_paid_entitlement(billing) is expected
+
+
+def _make_active_paid(uid: str) -> None:
+    """Credit packs are sold to active paid users only."""
+    get_firestore_client().collection("users").document(uid).set(
+        {
+            "billing": {
+                "activePlanKey": "solo_monthly",
+                "billingInterval": "month",
+                "stripeSubscriptionStatus": "active",
+            }
+        },
+        merge=True,
+    )
+
+
+@pytest.mark.parametrize("embedded", [False, True])
+@pytest.mark.parametrize(
+    "billing",
+    [
+        None,
+        {"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "canceled"},
+        {"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "incomplete"},
+    ],
+)
+def test_topup_checkout_is_refused_without_an_active_paid_plan(billing, embedded):
+    status = (billing or {}).get("stripeSubscriptionStatus", "none")
+    uid = f"user-topup-not-paid-{embedded}-{status}"
+    ensure_billing_state_for_login(uid, "not-paid@example.com")
+    if billing:
+        get_firestore_client().collection("users").document(uid).set({"billing": billing}, merge=True)
+    fake_stripe = _FakeStripeClient()
+    create = create_embedded_topup_checkout_session if embedded else create_topup_checkout_session
+
+    with pytest.raises(BillingHttpError) as exc:
+        create(uid, "not-paid@example.com", config=get_billing_config(), stripe_client=fake_stripe)
+
+    assert exc.value.status_code == 403
+    assert fake_stripe.created_checkout_sessions == []
+
+
 def test_create_topup_checkout_session_sets_adjustable_quantity_limit():
     uid = "user-topup-checkout"
     ensure_billing_state_for_login(uid, "topup@example.com")
+    _make_active_paid(uid)
     fake_stripe = _FakeStripeClient()
 
     result = create_topup_checkout_session(
@@ -328,6 +396,7 @@ def test_create_topup_checkout_session_sets_adjustable_quantity_limit():
 def test_create_embedded_topup_checkout_session_uses_fixed_quantity_for_one_slot(monkeypatch):
     uid = "user-embedded-topup-one-slot"
     ensure_billing_state_for_login(uid, "embedded-one-slot@example.com")
+    _make_active_paid(uid)
     fake_stripe = _FakeStripeClient()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
     monkeypatch.setattr(
@@ -352,6 +421,7 @@ def test_create_embedded_topup_checkout_session_uses_fixed_quantity_for_one_slot
 def test_create_embedded_topup_checkout_session_disables_redirects():
     uid = "user-embedded-topup"
     ensure_billing_state_for_login(uid, "embedded-topup@example.com")
+    _make_active_paid(uid)
     fake_stripe = _FakeStripeClient()
 
     result = create_embedded_topup_checkout_session(
@@ -388,6 +458,7 @@ def test_create_embedded_topup_checkout_session_disables_redirects():
 def test_topup_checkout_completed_grants_quantity_and_ledger():
     uid = "user-topup-webhook"
     get_or_create_credits(uid, "topup-webhook@example.com")
+    _make_active_paid(uid)
     fake_stripe = _FakeStripeClient()
     create_topup_checkout_session(
         uid,
@@ -448,6 +519,7 @@ def test_topup_checkout_completed_grants_quantity_and_ledger():
 def test_sync_topup_checkout_session_applies_completed_payment_idempotently():
     uid = "user-topup-sync"
     get_or_create_credits(uid, "topup-sync@example.com")
+    _make_active_paid(uid)
     fake_stripe = _FakeStripeClient()
     create_embedded_topup_checkout_session(
         uid,
@@ -510,6 +582,7 @@ def test_sync_topup_checkout_session_rejects_wrong_user():
     other_uid = "user-topup-sync-other"
     get_or_create_credits(uid, "topup-sync-owner@example.com")
     get_or_create_credits(other_uid, "topup-sync-other@example.com")
+    _make_active_paid(uid)
     fake_stripe = _FakeStripeClient()
     create_embedded_topup_checkout_session(
         uid,
@@ -547,6 +620,7 @@ def test_sync_topup_checkout_session_rejects_wrong_user():
 def test_cancel_topup_checkout_session_releases_hold_and_expires_stripe_session():
     uid = "user-topup-cancel"
     get_or_create_credits(uid, "topup-cancel@example.com")
+    _make_active_paid(uid)
     fake_stripe = _FakeStripeClient()
     create_embedded_topup_checkout_session(
         uid,
@@ -595,6 +669,7 @@ def test_cancel_topup_checkout_session_releases_hold_and_expires_stripe_session(
 def test_cancel_topup_checkout_session_does_not_cancel_completed_payment():
     uid = "user-topup-cancel-complete"
     get_or_create_credits(uid, "topup-cancel-complete@example.com")
+    _make_active_paid(uid)
     fake_stripe = _FakeStripeClient()
     create_embedded_topup_checkout_session(
         uid,
@@ -633,6 +708,7 @@ def test_cancel_topup_checkout_session_does_not_cancel_completed_payment():
 def test_expired_pending_topup_hold_is_marked_expired_and_does_not_block_checkout():
     uid = "user-topup-expired-hold"
     get_or_create_credits(uid, "topup-expired-hold@example.com")
+    _make_active_paid(uid)
     fake_stripe = _FakeStripeClient()
     create_embedded_topup_checkout_session(
         uid,
@@ -668,6 +744,7 @@ def test_topup_checkout_completed_fetches_sdk_line_item_objects(monkeypatch):
 
     uid = "user-topup-sdk-line-items"
     get_or_create_credits(uid, "topup-sdk-line-items@example.com")
+    _make_active_paid(uid)
     fake_stripe = _FakeStripeClient()
     create_topup_checkout_session(
         uid,
@@ -2750,3 +2827,113 @@ def test_subscription_sync_keeps_a_due_refresh_only_while_a_paid_grant_waits(
     )
     expected = due_at if keeps_due_date else datetime(2027, 1, 14, 12, 0, tzinfo=timezone.utc)
     assert billing["nextCreditRefreshAt"] == expected
+
+
+# --- Annual sale coupon (Black Friday 2026) ---
+
+_SALE_ENDS = datetime(2026, 12, 1, tzinfo=timezone.utc)
+# Prices in cents as Stripe returns them, for the "does the change apply now?" rule.
+_STRIPE_PRICES = {
+    "price_solo_monthly": {"id": "price_solo_monthly", "unit_amount": 699, "recurring": {"interval": "month"}},
+    "price_choir_early_monthly": {"id": "price_choir_early_monthly", "unit_amount": 1999, "recurring": {"interval": "month"}},
+    "price_choir_early_annual": {"id": "price_choir_early_annual", "unit_amount": 19900, "recurring": {"interval": "year"}},
+    "price_max_early_monthly": {"id": "price_max_early_monthly", "unit_amount": 3999, "recurring": {"interval": "month"}},
+    "price_max_early_annual": {"id": "price_max_early_annual", "unit_amount": 39900, "recurring": {"interval": "year"}},
+}
+
+
+def _sale_config(**overrides):
+    settings = {"annual_promo_coupon_id": "BF_TEST", "annual_promo_ends_at": _SALE_ENDS,
+                "max_early_supporter_enabled": True, **overrides}
+    return dataclasses.replace(get_billing_config(), **settings)
+
+
+@pytest.mark.parametrize(
+    ("plan_key", "now", "expected"),
+    [
+        ("choir_early_annual", datetime(2026, 11, 28, tzinfo=timezone.utc), "BF_TEST"),
+        ("max_early_annual", datetime(2026, 11, 30, 23, 59, tzinfo=timezone.utc), "BF_TEST"),
+        # Monthly plans and Solo are not in the sale.
+        ("choir_early_monthly", datetime(2026, 11, 28, tzinfo=timezone.utc), None),
+        ("max_early_monthly", datetime(2026, 11, 28, tzinfo=timezone.utc), None),
+        ("solo_annual", datetime(2026, 11, 28, tzinfo=timezone.utc), None),
+        # The sale ends at its end time.
+        ("choir_early_annual", _SALE_ENDS, None),
+    ],
+)
+def test_the_sale_coupon_is_for_pro_and_max_annual_until_the_sale_ends(plan_key, now, expected):
+    config = _sale_config()
+    assert annual_promo_coupon(get_plan(plan_key, config), config, now=now) == expected
+
+
+def test_no_sale_without_a_coupon_or_an_end_time():
+    config = get_billing_config()
+    assert annual_promo_coupon(get_plan("choir_early_annual", config), config) is None
+    no_end = dataclasses.replace(config, annual_promo_coupon_id="BF_TEST")
+    assert annual_promo_coupon(get_plan("choir_early_annual", no_end), no_end) is None
+
+
+@pytest.mark.parametrize("embedded", [False, True])
+@pytest.mark.parametrize(
+    ("plan_key", "discounted"),
+    [("choir_early_annual", True), ("max_early_annual", True), ("choir_early_monthly", False), ("solo_annual", False)],
+)
+def test_checkout_takes_the_sale_coupon_only_on_pro_and_max_annual(monkeypatch, embedded, plan_key, discounted):
+    monkeypatch.setattr(billing_plans_module, "datetime", _FrozenSaleTime)
+    uid = f"user-sale-checkout-{embedded}-{plan_key}"
+    ensure_billing_state_for_login(uid, "sale@example.com")
+    fake_stripe = _FakeStripeClient()
+    create = create_embedded_subscription_checkout_session if embedded else create_checkout_session
+
+    create(uid, "sale@example.com", plan_key, config=_sale_config(), stripe_client=fake_stripe)
+
+    params = fake_stripe.created_checkout_sessions[-1]
+    assert params.get("discounts") == ([{"coupon": "BF_TEST"}] if discounted else None)
+
+
+@pytest.mark.parametrize(
+    ("current_price", "plan_key", "discounted"),
+    [
+        # The same plan moving to annual, and upgrades, apply now: the first annual invoice is discounted.
+        ("price_choir_early_monthly", "choir_early_annual", True),
+        ("price_max_early_monthly", "max_early_annual", True),
+        ("price_solo_monthly", "max_early_annual", True),
+        ("price_choir_early_annual", "max_early_annual", True),
+        # A cheaper plan per month is booked for renewal: no coupon.
+        ("price_max_early_monthly", "choir_early_annual", False),
+        # Not an annual Pro or Max plan.
+        ("price_choir_early_monthly", "max_early_monthly", False),
+    ],
+)
+def test_plan_change_takes_the_sale_coupon_only_when_it_applies_now(monkeypatch, current_price, plan_key, discounted):
+    monkeypatch.setattr(billing_plans_module, "datetime", _FrozenSaleTime)
+    uid = f"switch-sale-{current_price}-{plan_key}"
+    _paid_user(uid)
+    subscription = _switch_subscription(current_price)
+    subscription["items"]["data"][0]["price"] = _STRIPE_PRICES[current_price]
+    fake_stripe = _switch_client(subscription)
+    fake_stripe.prices = _STRIPE_PRICES
+
+    create_plan_change_session(uid, plan_key, config=_sale_config(), stripe_client=fake_stripe)
+
+    confirm = fake_stripe.created_portal_sessions[-1]["flow_data"]["subscription_update_confirm"]
+    assert confirm.get("discounts") == ([{"coupon": "BF_TEST"}] if discounted else None)
+
+
+def test_plan_change_after_the_sale_has_no_coupon():
+    _paid_user("switch-after-sale")
+    fake_stripe = _switch_client()
+    fake_stripe.prices = _STRIPE_PRICES
+    config = _sale_config(annual_promo_ends_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+
+    create_plan_change_session("switch-after-sale", "choir_early_annual", config=config, stripe_client=fake_stripe)
+
+    assert "discounts" not in fake_stripe.created_portal_sessions[-1]["flow_data"]["subscription_update_confirm"]
+
+
+class _FrozenSaleTime(datetime):
+    """Black Friday afternoon, during the sale."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2026, 11, 27, 15, 0, tzinfo=tz or timezone.utc)

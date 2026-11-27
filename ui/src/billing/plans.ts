@@ -1,4 +1,5 @@
 import {
+  annualPromoFromEnv,
   getDisplayPlans as getSharedDisplayPlans,
   type BillingInterval,
   type BillingPlanKey,
@@ -30,10 +31,18 @@ const DEFAULT_EARLY_SUPPORTER_ENABLED =
 // Max stays hidden until its Stripe prices exist: the build turns it on with "true".
 const MAX_EARLY_SUPPORTER_ENABLED = import.meta.env.VITE_MAX_EARLY_SUPPORTER_ENABLED === "true";
 
+// A sale on the Pro and Max annual plans; the API applies the matching Stripe coupon.
+const ANNUAL_PROMO = annualPromoFromEnv(
+  import.meta.env.VITE_ANNUAL_PROMO_PERCENT_OFF,
+  import.meta.env.VITE_ANNUAL_PROMO_ENDS_AT,
+  import.meta.env.VITE_ANNUAL_PROMO_LABEL
+);
+
 export function getDisplayPlans(interval: BillingInterval = "annual") {
   return getSharedDisplayPlans(interval, {
     choirEarlySupporterEnabled: DEFAULT_EARLY_SUPPORTER_ENABLED,
     maxEarlySupporterEnabled: MAX_EARLY_SUPPORTER_ENABLED,
+    annualPromo: ANNUAL_PROMO,
   });
 }
 

@@ -10,7 +10,11 @@ import uuid
 from google.cloud import firestore
 
 from src.backend.billing_config import BillingConfig, get_billing_config, get_stripe_v1_client
-from src.backend.billing_store import get_billing_state, upsert_stripe_customer_id
+from src.backend.billing_store import (
+    get_billing_state,
+    has_active_paid_entitlement,
+    upsert_stripe_customer_id,
+)
 from src.backend.billing_types import BillingHttpError
 from src.backend.firebase_app import get_firestore_client
 from src.mcp.logging_utils import get_logger
@@ -90,12 +94,16 @@ def _create_topup_checkout_session(
         raise BillingHttpError(400, "Invalid credit pack.")
     if not billing_config.stripe_price_topup_15:
         raise BillingHttpError(503, "Credit pack checkout is not configured.")
+    # Credit packs add to a paid plan's monthly credits; a free user upgrades instead.
+    billing = get_billing_state(uid)
+    if not has_active_paid_entitlement(billing):
+        raise BillingHttpError(403, "Credit packs are for active paid plans.")
 
     db = get_firestore_client()
     raw_client = stripe_client or get_stripe_v1_client()
     client = getattr(raw_client, "v1", None) or raw_client
 
-    stripe_customer_id = get_billing_state(uid).get("stripeCustomerId")
+    stripe_customer_id = billing.get("stripeCustomerId")
     if not stripe_customer_id:
         customer = client.customers.create(
             params={

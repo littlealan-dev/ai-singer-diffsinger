@@ -53,7 +53,26 @@ type DisplayPlanOptions = {
   choirEarlySupporterEnabled?: boolean;
   /** Max is sold only at its founding price: with the offer off, its card is not shown. */
   maxEarlySupporterEnabled?: boolean;
+  /** A sale on the Pro and Max annual plans (the server applies the matching Stripe coupon). */
+  annualPromo?: AnnualPromo;
+  now?: Date;
 };
+
+export type AnnualPromo = { percentOff: number; endsAt: Date; label: string };
+
+/** The sale from build settings: a percentage off and an end time; anything missing is no sale. */
+export function annualPromoFromEnv(
+  percentOff: string | undefined,
+  endsAt: string | undefined,
+  label: string | undefined
+): AnnualPromo | undefined {
+  const percent = Number(percentOff);
+  const end = endsAt ? new Date(endsAt) : null;
+  if (!Number.isFinite(percent) || percent <= 0 || percent >= 100 || !end || Number.isNaN(end.getTime())) {
+    return undefined;
+  }
+  return { percentOff: percent, endsAt: end, label: label?.trim() || "Sale" };
+}
 
 export const INCLUDED_IN_EVERY_PLAN_FEATURES = [
   "MusicXML upload",
@@ -181,7 +200,7 @@ export function getDisplayPlans(
       ((price.monthlyCents * 12 - price.annualCents) / (price.monthlyCents * 12)) * 100
     );
 
-    return {
+    const display: DisplayPlan = {
       ...plan,
       price,
       planKey: isAnnual ? price.annualPlanKey : price.monthlyPlanKey,
@@ -202,6 +221,7 @@ export function getDisplayPlans(
       creditsLabel: `${plan.monthlyCredits} credits reset every month`,
       audioLabel: `About ${plan.audioMinutes} minutes of vocal audio monthly`,
     };
+    return withAnnualPromo(display, plan, price, isAnnual, options.annualPromo, options.now);
   });
 }
 
@@ -334,6 +354,30 @@ function calculateDiscountPercent(originalCents: number | undefined, currentCent
     return undefined;
   }
   return Math.round(((originalCents - currentCents) / originalCents) * 100);
+}
+
+/** On sale: a Pro or Max annual card shows the first year's price, then the price it renews at. */
+function withAnnualPromo(
+  display: DisplayPlan,
+  plan: PlanBase,
+  price: PaidPrice,
+  isAnnual: boolean,
+  promo: AnnualPromo | undefined,
+  now: Date = new Date()
+): DisplayPlan {
+  if (!promo || !isAnnual || (plan.cardKey !== "choir" && plan.cardKey !== "max") || now >= promo.endsAt) {
+    return display;
+  }
+  const firstYearCents = Math.round((price.annualCents * (100 - promo.percentOff)) / 100);
+  return {
+    ...display,
+    badge: promo.label,
+    priceLabel: formatPrice(Math.round(firstYearCents / 12), { wholeDollars: true }),
+    originalPriceLabel: formatPrice(Math.round(price.annualCents / 12), { wholeDollars: true }),
+    secondaryPrice: `${formatPrice(firstYearCents)} for the first year, then ${formatPrice(price.annualCents)}/yr`,
+    originalSecondaryPrice: undefined,
+    savingsLabel: `${promo.percentOff}% off`,
+  };
 }
 
 function formatPrice(cents: number, options: { wholeDollars?: boolean } = {}): string {

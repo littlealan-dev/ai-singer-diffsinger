@@ -59,7 +59,8 @@ type BillingPaywallModalProps = {
   onConfirmed?: (message: string) => void;
 };
 
-const paidStatuses = new Set(["active", "trialing", "past_due"]);
+// The server's ACTIVE_PAID_STATUSES (src/backend/billing_store.py): keep the two the same.
+const paidStatuses = new Set(["active", "past_due", "unpaid"]);
 // Stripe changes a plan only while the subscription is paid up (see the backend's change-plan).
 const changeableStatuses = new Set(["active", "trialing"]);
 const PLAN_CHANGE_RETURN_TIMEOUT_MS = 30000;
@@ -92,8 +93,13 @@ export function BillingPaywallModal({
   const activeEmbeddedCheckoutRef = useRef<ActiveEmbeddedCheckout | null>(null);
   const embeddedCheckoutRef = useRef<{ destroy: () => void } | null>(null);
   // The paywall offers upgrades only: Free is left out, so the paid plans and the Credit Pack fit in a row.
+  // The Credit Pack is for active paid users only; the server refuses it to anyone else.
   const plans = useMemo(() => getDisplayPlans(interval).filter((plan) => plan.cardKey !== "free"), [interval]);
-  const activePaid = billing.activePlanKey !== "free" && paidStatuses.has(billing.stripeSubscriptionStatus || "active");
+  // The server's has_active_paid_entitlement: a paid plan, a billing interval and a paid status.
+  const activePaid =
+    billing.activePlanKey !== "free" &&
+    billing.billingInterval !== "none" &&
+    paidStatuses.has(billing.stripeSubscriptionStatus || "");
   const copy = getTriggerCopy(trigger, billing);
   const hardBlock = isHardBlockTrigger(trigger);
 
@@ -528,7 +534,7 @@ export function BillingPaywallModal({
               </button>
             </div>
 
-            <div className={clsx("billing-plan-grid", plans.length === 3 && "four-cards")}>
+            <div className={clsx("billing-plan-grid", plans.length + (activePaid ? 1 : 0) === 4 && "four-cards")}>
               {plans.map((plan) => (
                 <PlanCard
                   key={plan.cardKey}
@@ -542,13 +548,15 @@ export function BillingPaywallModal({
                   onChangePlan={handlePlanChange}
                 />
               ))}
-              <TopupPlanCard
-                billing={billing}
-                busy={busyAction === "topup"}
-                emphasized={trigger === "credits_exhausted" || trigger === "insufficient_credits" || trigger === "sing_all_topup"}
-                disabled={billing.loading || Boolean(billing.error) || billing.topupActivePackCount >= 3}
-                onCheckout={handleTopupCheckout}
-              />
+              {activePaid ? (
+                <TopupPlanCard
+                  billing={billing}
+                  busy={busyAction === "topup"}
+                  emphasized={trigger === "credits_exhausted" || trigger === "insufficient_credits" || trigger === "sing_all_topup"}
+                  disabled={billing.loading || Boolean(billing.error) || billing.topupActivePackCount >= 3}
+                  onCheckout={handleTopupCheckout}
+                />
+              ) : null}
             </div>
             <CreditRatesTable />
             <div className="billing-shared-features" aria-label="Included in every plan">

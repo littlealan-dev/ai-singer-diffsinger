@@ -324,6 +324,8 @@ def test_sing_it_rejects_changed_score_before_reservation(monkeypatch):
     {},
     # A paid plan whose subscription has ended is no paid plan.
     {"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "canceled"},
+    # A subscription whose first payment never went through was never paid for.
+    {"activePlanKey": "solo_monthly", "billingInterval": "month", "stripeSubscriptionStatus": "incomplete"},
 ])
 def test_sing_it_refuses_a_user_without_a_paid_plan_before_reserving(monkeypatch, billing):
     # The API refuses on its own: a client that skips the disabled button gets no job.
