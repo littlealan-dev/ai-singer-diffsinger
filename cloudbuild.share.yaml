@@ -1,0 +1,16 @@
+# The share service's image (Dockerfile.share). Build with scripts/build_share_prod.sh.
+steps:
+  - name: gcr.io/cloud-builders/gcloud
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        mkdir -p /workspace/share-context
+        cp Dockerfile.share requirements-share.txt /workspace/share-context/
+        cp -R src /workspace/share-context/src
+  - name: gcr.io/cloud-builders/docker
+    dir: /workspace/share-context
+    args: [build, -f, Dockerfile.share, -t, "${_SHARE_IMAGE}", .]
+
+images:
+  - ${_SHARE_IMAGE}

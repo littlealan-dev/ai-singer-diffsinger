@@ -39,6 +39,13 @@ from src.backend.llm_prompt import (
     parse_llm_response,
 )
 from src.backend.message_catalog import backend_message
+from src.backend.instrumental_midi_files import (
+    INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY,
+    INSTRUMENTAL_MIDI_STORAGE_PATH_KEYS,
+    current_midi_signature,
+    instrumental_midi_storage_path,
+    restore_published_midi,
+)
 from src.backend.mcp_client import McpRouter, McpToolError
 from src.backend.gpu_errors import (
     GPU_ERROR_CATEGORY,
@@ -239,13 +246,6 @@ IGNORED_SYNTHESIS_TARGET_FIELDS = (
     "source_voice_part_id",
     "allow_lyric_propagation",
 )
-INSTRUMENTAL_MIDI_SIGNATURE_METADATA_KEY = "instrumental_midi_source_signature"
-# Where each published MIDI file lives in storage, so an instance whose disk
-# never had it can restore it. Keyed by kind: "written" or "expanded".
-INSTRUMENTAL_MIDI_STORAGE_PATH_KEYS = {
-    "written": "instrumental_midi_original_storage_path",
-    "expanded": "instrumental_midi_expanded_storage_path",
-}
 TOOL_SYNTHESIZE = "synthesize"
 TOOL_ADD_SOLFEGE_VERSE = "add_solfege_lyric_verse"
 TOOL_MODIFY_SOLFEGE_SETTINGS = "modify_solfege_settings"
@@ -10008,10 +10008,13 @@ class Orchestrator:
         musicxml_path: Optional[Path] = None,
     ) -> str:
         """Return the source signature of the session's instrumental MIDI."""
-        if musicxml_path is None:
-            musicxml_path = await self._sessions.ensure_active_musicxml(session_id, user_id)
-        return await asyncio.to_thread(
-            instrumental_midi_source_signature, score_id, musicxml_path, score_summary
+        return await current_midi_signature(
+            self._sessions,
+            session_id,
+            user_id=user_id,
+            score_id=score_id,
+            score_summary=score_summary,
+            musicxml_path=musicxml_path,
         )
 
     async def _ensure_instrumental_midi_artifacts(
@@ -10211,44 +10214,17 @@ class Orchestrator:
         kind: str,
         local_path: Path,
     ) -> bool:
-        """Make a published MIDI file available on this instance's disk.
-
-        Returns True when the file is there, restoring it from storage when
-        another instance published it. Returns False when it cannot be had.
-        """
-        if local_path.is_file():
-            return True
-        if not self._settings.backend_use_storage or not self._settings.storage_bucket:
-            return False
-        object_path = files.get(INSTRUMENTAL_MIDI_STORAGE_PATH_KEYS[kind])
-        if not user_id or not isinstance(object_path, str) or not object_path.startswith(
-            instrumental_midi_storage_prefix(user_id, session_id)
-        ):
-            return False
-        temporary_path = local_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
-        try:
-            data = await asyncio.to_thread(
-                download_bytes, self._settings.storage_bucket, object_path
-            )
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary_path.write_bytes(data)
-            temporary_path.replace(local_path)
-        except Exception:
-            temporary_path.unlink(missing_ok=True)
-            self._logger.warning(
-                "instrumental_midi_restore_failed session=%s object=%s",
-                session_id,
-                object_path,
-                exc_info=True,
-            )
-            return False
-        self._logger.info(
-            "instrumental_midi_restored session=%s object=%s bytes=%s",
-            session_id,
-            object_path,
-            len(data),
+        """Make a published MIDI file available on this instance's disk (see restore_published_midi)."""
+        return await restore_published_midi(
+            self._settings,
+            self._logger,
+            user_id=user_id,
+            session_id=session_id,
+            files=files,
+            kind=kind,
+            local_path=local_path,
+            download=download_bytes,
         )
-        return True
 
     async def _publish_instrumental_midi_session_state(
         self,
@@ -11046,61 +11022,6 @@ def _job_storage_lossless_output_path(user_id: str, session_id: str, job_id: str
     return f"sessions/{user_id}/{session_id}/jobs/{job_id}/source.wav"
 
 
-def instrumental_midi_storage_prefix(user_id: str, session_id: str) -> str:
-    """Return the storage prefix every instrumental MIDI object of a session is under."""
-    return f"sessions/{user_id}/{session_id}/instrumental-midi/"
-
-
-def instrumental_midi_storage_path(
-    user_id: str, session_id: str, signature: str, kind: str
-) -> str:
-    """Return the storage object of one MIDI file, keyed by its source signature.
-
-    Identical content always maps to the same object, so a later job for the
-    same instrumental music finds the file already there.
-    """
-    return f"{instrumental_midi_storage_prefix(user_id, session_id)}{signature}/{kind}.mid"
-
-
-def instrumental_midi_source_signature(
-    score_id: Optional[str],
-    musicxml_path: Path,
-    score_summary: Optional[Dict[str, Any]],
-) -> str:
-    """Identify instrumental MIDI by everything it is built from.
-
-    The score version is not enough: it also advances on selection-only
-    changes, such as switching lyric lines, which leave every instrumental note
-    unchanged. The MIDI depends on the uploaded score, the instrumental parts'
-    music, the score-wide timing (its tempo map comes from the whole score and
-    it expands repeats), the playback presets and the MIDI format version, so
-    it is keyed on those. Vocal edits, lyric lines and solfege lines leave it
-    unchanged. A summary parsed before part signatures existed falls back to
-    the whole MusicXML file.
-    """
-    digest = hashlib.sha256()
-    for field in (f"performance-midi-{PERFORMANCE_MIDI_VERSION}", str(score_id or "")):
-        digest.update(field.encode("utf-8"))
-        digest.update(b"\x1f")
-    summary = score_summary or {}
-    timing = summary.get("timing_signature")
-    instrumental_signatures = [
-        part.get("part_signature")
-        for part in summary.get("parts") or []
-        if isinstance(part, dict) and _part_feeds_instrumental_midi(part)
-    ]
-    if timing and all(instrumental_signatures):
-        for field in [str(timing), *instrumental_signatures]:
-            digest.update(str(field).encode("utf-8"))
-            digest.update(b"\x1f")
-    else:
-        digest.update(Path(musicxml_path).read_bytes())
-        digest.update(b"\x1f")
-    assignments = llm_program_assignments_from_summary(summary)
-    digest.update(json.dumps(assignments, sort_keys=True).encode("utf-8"))
-    return digest.hexdigest()[:24]
-
-
 def _json_object_or_none(text: Optional[str]) -> Optional[Dict[str, Any]]:
     """The JSON object in text, or None when it holds none."""
     try:
@@ -11121,19 +11042,6 @@ def _changed_render_choices(
         for key in sorted(set(quoted) | set(requested))
         if quoted.get(key) != requested.get(key)
     }
-
-
-def _part_feeds_instrumental_midi(part: Dict[str, Any]) -> bool:
-    """A part that can become an instrumental MIDI track, including a user-assignable drum part."""
-    return any(
-        isinstance(instrument, dict)
-        and (
-            instrument.get("eligible_for_instrumental_midi")
-            or instrument.get("instrumental_candidate")
-            or instrument.get("user_assignable")
-        )
-        for instrument in part.get("instruments") or []
-    )
 
 
 def _job_progress_url(session_id: str, job_id: str) -> str:

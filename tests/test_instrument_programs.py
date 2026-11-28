@@ -32,7 +32,7 @@ def test_new_unpitched_detection_only_changes_user_assignable_parts() -> None:
     assert _instrumental_part_metadata(score, {0: "P1"}, ordinary)[0]["percussion"] is False
     assignable = {"P1": {**ordinary["P1"], "user_assignable": True}}
     assert _instrumental_part_metadata(score, {0: "P1"}, assignable)[0]["percussion"] is True
-from src.backend.orchestrator import _part_feeds_instrumental_midi
+from src.backend.instrumental_midi_files import part_feeds_instrumental_midi as _part_feeds_instrumental_midi
 
 
 MISSING_PROGRAM_XML = """<?xml version="1.0" encoding="UTF-8"?>

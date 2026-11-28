@@ -127,7 +127,13 @@ cd "${ROOT_DIR}"
 # Append, so a restart keeps the previous run's log (e.g. what a worker did
 # while it was shutting down); each run starts with a marker line.
 echo "===== ${BACKEND_DEV_NAME} start $(date -u +%Y-%m-%dT%H:%M:%SZ) build=${BACKEND_BUILD_ID} =====" >> "${LOG_FILE}"
-nohup "${PYTHON_BIN}" -m src.backend.server \
+# BACKEND_APP_FACTORY runs another app on this setup instead of the API (the share service).
+if [[ -n "${BACKEND_APP_FACTORY:-}" ]]; then
+  server_args=(-m uvicorn --factory "${BACKEND_APP_FACTORY}")
+else
+  server_args=(-m src.backend.server)
+fi
+nohup "${PYTHON_BIN}" "${server_args[@]}" \
   --host "${BACKEND_HOST}" \
   --port "${BACKEND_PORT}" \
   --log-level "${BACKEND_LOG_LEVEL}" \

@@ -15,8 +15,7 @@ from src.musicxml.part_reference import load_musicxml_score, map_parser_part_ind
 from src.musicxml.instrument_programs import instrumental_programs_by_part
 from src.musicxml.tempo_map import score_tempo_events
 
-
-PERFORMANCE_MIDI_VERSION = 10
+from src.musicxml.performance_midi_version import PERFORMANCE_MIDI_VERSION
 
 # Common five-line drum staff positions and noteheads to General MIDI keys.
 STAFF_POSITION_DRUM_KEYS = {

@@ -581,6 +581,8 @@ export type BackendReadyzResponse = {
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+// Public share links have their own slim service, which starts fast; the API when unset.
+const SHARE_API_BASE = import.meta.env.VITE_SHARE_API_BASE || API_BASE;
 const APP_ENV = import.meta.env.VITE_APP_ENV ?? "";
 const IS_LOCAL_DEV = ["dev", "development", "local"].includes(APP_ENV.toLowerCase());
 export const BACKEND_STARTING_MESSAGE =
@@ -646,13 +648,13 @@ function parsePositiveNumber(value: string | undefined, fallback: number): numbe
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function withApiBase(url: string): string {
+function withApiBase(url: string, base: string = API_BASE): string {
   if (!url) return url;
   if (url.startsWith("http://") || url.startsWith("https://")) {
     return url;
   }
-  if (!API_BASE) return url;
-  return `${API_BASE}${url.startsWith("/") ? "" : "/"}${url}`;
+  if (!base) return url;
+  return `${base}${url.startsWith("/") ? "" : "/"}${url}`;
 }
 
 function normalizeProgressResponse(payload: ProgressResponse): ProgressResponse {
@@ -827,11 +829,11 @@ function errorMessageFromBody(text: string): string | null {
   return text;
 }
 
-async function request<T>(path: string, options: RequestInit): Promise<T> {
+async function request<T>(path: string, options: RequestInit, base: string = API_BASE): Promise<T> {
   let headers = await withAppCheckHeaders(options.headers);
   headers = await withAuthHeaders(headers);
   const response = await fetchWithTimeout(
-    `${API_BASE}${path}`,
+    `${base}${path}`,
     { ...options, headers },
     timeoutForPath(path),
     () => abortErrorForPath(path)
@@ -1103,12 +1105,12 @@ export async function fetchSharePage(token: string): Promise<SharePageData> {
   return request<SharePageData>(`/public/s/${encodeURIComponent(token)}`, {
     method: "GET",
     cache: "no-store",
-  });
+  }, SHARE_API_BASE);
 }
 
 /** A public share file (score, MIDI or take), with the App Check header and no sign-in. */
 async function fetchShareFile(url: string, fallback: string): Promise<Response> {
-  const response = await fetchWithTimeout(withApiBase(url), {
+  const response = await fetchWithTimeout(withApiBase(url, SHARE_API_BASE), {
     headers: await withAppCheckHeaders(),
     cache: "no-store",
   });

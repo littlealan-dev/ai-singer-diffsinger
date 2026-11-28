@@ -52,8 +52,8 @@ from src.backend.orchestrator import (
     _format_synthesis_error,
     _ensure_job_input_storage,
     _resolve_job_input_snapshot_paths,
-    instrumental_midi_source_signature,
 )
+from src.backend.instrumental_midi_files import instrumental_midi_source_signature
 from src.backend.llm_prompt import LlmResponse, ToolCall
 from src.backend.quote_presentation import presentation_for_quote, presented_quote
 from src.backend.session import SessionStore
@@ -687,11 +687,11 @@ def _prepare_app(monkeypatch, overrides=None):
         lambda bucket, storage_path: _fake_storage_object(storage_path),
     )
     monkeypatch.setattr(
-        "src.backend.main.object_size",
+        "src.backend.share_serving.object_size",
         lambda bucket, storage_path: len(_fake_storage_object(storage_path)),
     )
     monkeypatch.setattr(
-        "src.backend.main.download_byte_range",
+        "src.backend.share_serving.download_byte_range",
         lambda bucket, storage_path, start, end: _fake_storage_object(storage_path)[
             start : end + 1
         ],
@@ -14649,8 +14649,8 @@ def test_the_stream_of_a_dispatched_job_ends_at_its_terminal_status(client, monk
 
 
 def _serve_storage_audio(monkeypatch, data, range_header=None, chunk_bytes=4):
-    """Serve a stored object through _stream_storage_audio; return the response and downloads."""
-    import src.backend.main as backend_main
+    """Serve a stored object through stream_storage_audio; return the response and downloads."""
+    import src.backend.share_serving as share_serving
 
     downloads = []
 
@@ -14658,18 +14658,16 @@ def _serve_storage_audio(monkeypatch, data, range_header=None, chunk_bytes=4):
         downloads.append((start, end))
         return data[start : end + 1]
 
-    def whole_object_download(*_args, **_kwargs):
-        raise AssertionError("audio must not download the whole object")
-
-    monkeypatch.setattr(backend_main, "object_size", lambda bucket, path: len(data))
-    monkeypatch.setattr(backend_main, "download_byte_range", fake_download_byte_range)
-    monkeypatch.setattr(backend_main, "download_bytes", whole_object_download)
-    monkeypatch.setattr(backend_main, "_STORAGE_AUDIO_CHUNK_BYTES", chunk_bytes)
+    # share_serving has no whole-object download: audio is read one range at a time.
+    assert not hasattr(share_serving, "download_bytes")
+    monkeypatch.setattr(share_serving, "object_size", lambda bucket, path: len(data))
+    monkeypatch.setattr(share_serving, "download_byte_range", fake_download_byte_range)
+    monkeypatch.setattr(share_serving, "STORAGE_AUDIO_CHUNK_BYTES", chunk_bytes)
     request = SimpleNamespace(headers={"range": range_header} if range_header else {})
     settings = SimpleNamespace(storage_bucket="bucket")
 
     async def run():
-        response = await backend_main._stream_storage_audio(
+        response = await share_serving.stream_storage_audio(
             request, settings, "sessions/u/s/jobs/j/output.mp3"
         )
         body = b"".join([chunk async for chunk in response.body_iterator])

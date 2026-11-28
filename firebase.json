@@ -358,14 +358,14 @@
       {
         "source": "/s/**",
         "run": {
-          "serviceId": "sightsinger-api",
+          "serviceId": "sightsinger-share",
           "region": "us-east4"
         }
       },
       {
         "source": "/public/s/**",
         "run": {
-          "serviceId": "sightsinger-api",
+          "serviceId": "sightsinger-share",
           "region": "us-east4"
         }
       },
