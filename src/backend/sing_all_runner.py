@@ -16,7 +16,10 @@ from src.backend.message_catalog import backend_message
 from src.backend.sing_all import (
     ACTIVE_JOB_STATUSES, decide, materialize_rows, wanted_takes, mark_voice_ranges, summary_with_judged_instruments,
 )
+from src.mcp.logging_utils import get_logger
 from src.musicxml.solfege import GENERATED_LYRIC_NAME
+
+logger = get_logger(__name__)
 
 
 async def start_render_execution(job_id: str, settings: Any) -> None:
@@ -442,8 +445,10 @@ class SingAllRunner:
 
     async def _add_solfege(self, job: dict[str, Any], snapshot: dict[str, Any]) -> None:
         session_id = job["sessionId"]
+        # Only takes still to sing: a part whose split failed has skipped takes and no part.
         rows = {item["rowId"] for item in job["items"]
-                if item["type"] == "take" and item["mode"] == "solfege"}
+                if item["type"] == "take" and item["mode"] == "solfege"
+                and item.get("status") == "queued"}
         targets = {row["partId"] for row in job["rows"] if row["rowId"] in rows}
         source = await self.orchestrator._sessions.ensure_active_musicxml(session_id, job["uid"])
         output = self.orchestrator._sessions.session_dir(session_id) / f"score-solfege-{uuid.uuid4().hex}.xml"
@@ -455,7 +460,9 @@ class SingAllRunner:
                  "parts": sorted(targets),
                  "settings": dict(snapshot.get("solfege_settings") or {})},
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning("sing_all_solfege_failed job_id=%s error_type=%s error=%s",
+                           job["jobId"], type(exc).__name__, str(exc)[:300])
             result = None
         if not isinstance(result, dict):
             result = {"skipped": [{"part_id": part_id} for part_id in targets]}

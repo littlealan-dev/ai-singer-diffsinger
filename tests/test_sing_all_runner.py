@@ -146,12 +146,50 @@ def test_solfege_tool_failure_marks_quoted_rows_skipped(monkeypatch, tmp_path):
         _mcp_musicxml_path=str,
         _settings=SimpleNamespace(project_root=tmp_path),
     )
-    job = _job([{"type": "take", "mode": "solfege", "rowId": "row-a"}],
+    job = _job([{"type": "take", "mode": "solfege", "rowId": "row-a", "status": "queued"}],
                rows=[{"rowId": "row-a", "partId": "P1"}], stage="solfege")
     runner = sing_all_runner.SingAllRunner(orchestrator)
     asyncio.run(runner._add_solfege(job, {}))
     assert updates == [{"solfegePrepared": True, "solfegeFailedRows": ["row-a"],
                         "solfegeSelections": {}}]
+
+
+def test_solfege_leaves_out_takes_skipped_after_a_failed_split(monkeypatch, tmp_path):
+    """A part whose split failed has no part and skipped takes; the other parts still get solfège."""
+    updates, calls = [], []
+
+    def tool(_name, args):
+        calls.append(args["parts"])
+        return {"completed_targets": [{"part_id": "Women 1", "lyric_selection": {"verse": "solfege"}}]}
+
+    def apply(_job_id, fields, **_kwargs):
+        updates.append(fields)
+        return True
+
+    async def persist(_session_id, _result):
+        return None
+
+    monkeypatch.setattr(sing_all_runner.sing_all_store, "apply", apply)
+    orchestrator = SimpleNamespace(
+        _sessions=SimpleNamespace(
+            ensure_active_musicxml=lambda *_args: _async_value(tmp_path / "score.xml"),
+            session_dir=lambda *_args: tmp_path,
+        ),
+        _router=SimpleNamespace(call_tool=tool),
+        _mcp_musicxml_path=str,
+        _persist_solfege_result=persist,
+        _settings=SimpleNamespace(project_root=tmp_path),
+    )
+    job = _job([
+        {"type": "take", "mode": "solfege", "rowId": "women-1", "status": "queued"},
+        {"type": "take", "mode": "solfege", "rowId": "men-1", "status": "skipped",
+         "reason": "split_failed"},
+    ], rows=[{"rowId": "women-1", "partId": "Women 1"}, {"rowId": "men-1", "partId": None}],
+        stage="solfege")
+    asyncio.run(sing_all_runner.SingAllRunner(orchestrator)._add_solfege(job, {}))
+    assert calls == [["Women 1"]]
+    assert updates == [{"solfegePrepared": True, "solfegeFailedRows": [],
+                        "solfegeSelections": {"Women 1": {"verse": "solfege"}}}]
 
 
 def test_solfege_runs_the_real_tool_and_prepares_every_row(monkeypatch):
@@ -183,7 +221,7 @@ def test_solfege_runs_the_real_tool_and_prepares_every_row(monkeypatch):
         _persist_solfege_result=persist,
         _settings=SimpleNamespace(project_root=root),
     )
-    job = _job([{"type": "take", "mode": "solfege", "rowId": "row-a"}],
+    job = _job([{"type": "take", "mode": "solfege", "rowId": "row-a", "status": "queued"}],
                rows=[{"rowId": "row-a", "partId": "Soprano"}], stage="solfege")
     try:
         asyncio.run(sing_all_runner.SingAllRunner(orchestrator)._add_solfege(
