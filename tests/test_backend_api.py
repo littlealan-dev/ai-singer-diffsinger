@@ -960,6 +960,18 @@ def test_readyz_requires_both_workers_and_rejects_draining_instance(client, monk
     assert response.json()["status"] == "draining"
 
 
+@pytest.mark.parametrize("client_with_env", [{"MCP_START_ON_FIRST_CALL": "true"}], indirect=True)
+def test_api_starting_mcp_on_first_call_is_ready_before_mcp_starts(client_with_env):
+    """The request-billed API in prod: a cold start serves share links without waiting for MCP."""
+    test_client, app = client_with_env
+
+    response = test_client.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json()["mcp"]["status"] == "on_demand"
+    assert app.state.router._startup_future is None
+
+
 def test_upload_interrupted_by_shutdown_returns_temporary_unavailability(client, monkeypatch):
     test_client, app = client
     session_id = _create_session(test_client)

@@ -144,7 +144,8 @@ deploy_args=(
   --port=8080
   --command=python3
   --args=-m,src.backend.server,--host,0.0.0.0,--port,8080,--log-level,debug,--access-log
-  --startup-probe='httpGet.path=/readyz,httpGet.port=8080,initialDelaySeconds=0,periodSeconds=10,timeoutSeconds=2,failureThreshold=24'
+  # Checked every 2 s, so traffic arrives within 2 s of the app being up; still 240 s in all.
+  --startup-probe='httpGet.path=/readyz,httpGet.port=8080,initialDelaySeconds=0,periodSeconds=2,timeoutSeconds=2,failureThreshold=120'
 )
 if [[ "${DEPLOY_TRAFFIC}" == "none" ]]; then
   # Traffic that followed LATEST is pinned to the revision serving it now.
