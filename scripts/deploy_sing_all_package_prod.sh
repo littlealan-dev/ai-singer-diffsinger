@@ -52,12 +52,16 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   print_command run services describe "${API_SERVICE}" --project="${PROJECT}" --region="${REGION}" --format=json
   secrets_arg="--set-secrets=<the API's secret references>"
 else
+  service_file="${work_dir}/api-service.json"
   gcloud run services describe "${API_SERVICE}" --project="${PROJECT}" --region="${REGION}" --format=json \
-    | python3 - "${env_file}" "${secrets_file}" <<'PY'
+    > "${service_file}"
+  # The Python program comes from the heredoc on stdin, so the service JSON is passed as a file.
+  python3 - "${service_file}" "${env_file}" "${secrets_file}" <<'PY'
 import json
 import sys
 
-service = json.load(sys.stdin)
+with open(sys.argv[1], encoding="utf-8") as source:
+    service = json.load(source)
 env = service["spec"]["template"]["spec"]["containers"][0].get("env", [])
 plain, secrets = {}, []
 for entry in env:
@@ -68,9 +72,9 @@ for entry in env:
         plain[entry["name"]] = entry.get("value", "")
 if not plain:
     raise SystemExit("The API service has no settings to copy.")
-with open(sys.argv[1], "w", encoding="utf-8") as out:
-    json.dump(plain, out)  # JSON is YAML, which --env-vars-file reads.
 with open(sys.argv[2], "w", encoding="utf-8") as out:
+    json.dump(plain, out)  # JSON is YAML, which --env-vars-file reads.
+with open(sys.argv[3], "w", encoding="utf-8") as out:
     out.write(",".join(secrets))
 PY
   secrets_arg="--set-secrets=$(cat "${secrets_file}")"
