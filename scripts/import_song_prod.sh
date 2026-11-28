@@ -5,10 +5,11 @@ set -euo pipefail
 # bundle and run this command with DRY_RUN=1 (the default). Run with DRY_RUN=0
 # and --share to publish, then open the link it prints.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export DRY_RUN="${DRY_RUN:-1}"
+dry_run="${DRY_RUN:-1}"
 set -a
 source "$ROOT/env/prod.env"
 set +a
+export DRY_RUN="$dry_run"
 
 # Select the destination from prod.env, independently of any local stack.
 unset FIRESTORE_EMULATOR_HOST FIREBASE_AUTH_EMULATOR_HOST STORAGE_EMULATOR_HOST

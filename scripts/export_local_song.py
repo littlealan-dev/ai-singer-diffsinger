@@ -11,7 +11,8 @@ from google.auth.credentials import AnonymousCredentials
 from google.cloud.firestore import Client
 
 from scripts.local_song_bundle import (
-    VERSION, bundle_path, encode, file_integrity, owned_job, python_root, require_song,
+    VERSION, bundle_path, encode, file_integrity, owned_job, path_component,
+    require_song,
     storage_prefix, vocal_job_ids, write_json,
 )
 from src.backend.config import Settings
@@ -27,22 +28,22 @@ def _copy_disk_paths(fields, *, prefix, session_dir, project_root, objects_dir, 
                      report, document, job_id=None):
     """Resolve local file references only inside the exported session directory."""
     for key, value in fields.items():
-        if not isinstance(value, str):
+        if not isinstance(value, str) or not value or value.startswith(prefix):
             continue
-        source = project_root / value
-        if not source.is_relative_to(session_dir):
-            if (job_id is not None and value and not value.startswith(prefix)):
-                raise ValueError(f"{document}.{key} must point inside the Song.")
-            continue
-        source = source.resolve()
-        if not source.is_relative_to(session_dir):
-            raise ValueError(f"{document}.{key} must point inside the Song.")
-
+        recorded_path = Path(value)
+        source = project_root / recorded_path
         storage_key = _FILE_STORAGE_KEYS.get(key)
+        if not (job_id or storage_key or recorded_path.is_absolute()
+                or source.is_relative_to(session_dir)):
+            continue
+
+        # Another local backend may have written the cached path. Prefer the
+        # exact stored sibling when present, and never read outside this Song.
         existing = fields.get(storage_key) if storage_key else None
+        source = source.resolve()
         if isinstance(existing, str) and existing.startswith(prefix) and existing[len(prefix):] in objects:
             target = existing[len(prefix):]
-        elif source.is_file():
+        elif source.is_relative_to(session_dir) and source.is_file():
             if job_id:
                 filename = "source.wav" if key == "losslessOutputPath" else f"output{source.suffix.lower()}"
                 target = f"jobs/{job_id}/{filename}"
@@ -66,7 +67,7 @@ def _copy_disk_paths(fields, *, prefix, session_dir, project_root, objects_dir, 
 
 
 def export_song(db, bucket, sid, out_dir, *, project_root, sessions_dir):
-    session_ref = db.collection("sessions").document(sid)
+    session_ref = db.collection("sessions").document(path_component(sid))
     session = session_ref.get().to_dict()
     require_song(session)
     uid = session["userId"]
@@ -132,7 +133,7 @@ def main():
     db = Client(project=os.environ["GOOGLE_CLOUD_PROJECT"], credentials=AnonymousCredentials())
     try:
         report = export_song(db, get_bucket(settings.storage_bucket), args.local_session_id,
-                             args.out_dir, project_root=python_root(),
+                             args.out_dir, project_root=settings.project_root,
                              sessions_dir=settings.sessions_dir)
     except (OSError, ValueError) as exc:
         parser.exit(1, f"Export failed: {exc}\n")

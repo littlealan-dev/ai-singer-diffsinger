@@ -12,7 +12,7 @@ from google.api_core.exceptions import GoogleAPICallError, NotFound, Preconditio
 from google.cloud import firestore
 
 from scripts.local_song_bundle import (
-    VERSION, bundle_path, decode, file_integrity, owned_job, path_component, read_json,
+    VERSION, bundle_path, decode, encode, file_integrity, owned_job, path_component, read_json,
     require_song, storage_prefix, vocal_job_ids,
 )
 from src.backend.config import Settings
@@ -164,7 +164,8 @@ def import_song(db, bucket, store, bundle, uid, *, get_user, dry_run=True,
     if previous.exists and existing.get("userId") != uid:
         raise ValueError("The destination session belongs to a different user.")
     share_ref = _existing_share(db, existing, sid, uid)
-    if not previous.exists and player_ref.get().exists:
+    previous_player = player_ref.get()
+    if not previous.exists and previous_player.exists:
         raise ValueError("The destination contains a player without its session.")
 
     session.pop("shareToken", None)
@@ -205,6 +206,8 @@ def import_song(db, bucket, store, bundle, uid, *, get_user, dry_run=True,
     def commit(transaction):
         if session_ref.get(transaction=transaction).update_time != previous.update_time:
             raise ValueError("The destination session changed during the import.")
+        if player_ref.get(transaction=transaction).update_time != previous_player.update_time:
+            raise ValueError("The destination player changed during the import.")
         for ref, updated, _ in job_writes:
             if ref.get(transaction=transaction).update_time != updated:
                 raise ValueError("A destination job changed during the import.")
@@ -222,9 +225,8 @@ def import_song(db, bucket, store, bundle, uid, *, get_user, dry_run=True,
     return token
 
 
-def remove_song(db, bucket, store, sid, uid, *, get_user, dry_run=True):
+def remove_song(db, bucket, store, sid, uid, *, dry_run=True):
     prefix = storage_prefix(uid, sid)
-    _checked_user(uid, get_user)
     session_ref = db.collection("sessions").document(sid)
     snapshot = session_ref.get()
     session = snapshot.to_dict()
@@ -257,7 +259,8 @@ def remove_song(db, bucket, store, sid, uid, *, get_user, dry_run=True):
     if share_ref:
         asyncio.run(store.share_off(sid, uid))
         snapshot = session_ref.get()
-        if snapshot.to_dict() != {key: value for key, value in session.items() if key != "shareToken"}:
+        expected = {key: value for key, value in session.items() if key != "shareToken"}
+        if encode(snapshot.to_dict()) != encode(expected):
             raise ValueError("The destination session changed during removal.")
     for blob in blobs:
         try:
@@ -311,8 +314,7 @@ def main():
             storage_bucket=settings.storage_bucket,
         )
         if args.remove:
-            remove_song(db, bucket, store, args.remove, args.prod_uid,
-                        get_user=auth.get_user, dry_run=dry_run == "1")
+            remove_song(db, bucket, store, args.remove, args.prod_uid, dry_run=dry_run == "1")
         else:
             import_song(db, bucket, store, args.out_dir, args.prod_uid,
                         get_user=auth.get_user, dry_run=dry_run == "1",

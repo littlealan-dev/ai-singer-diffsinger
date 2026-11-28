@@ -5,13 +5,12 @@ import hashlib
 import json
 import math
 from datetime import datetime, timezone
-from pathlib import Path
 
 from google.api_core.datetime_helpers import DatetimeWithNanoseconds
 from google.cloud.firestore import GeoPoint
 
 VERSION = 1
-_TYPE = "__firestore__"
+_TYPE = "$firestore"
 
 
 def path_component(value):
@@ -108,7 +107,3 @@ def owned_job(data, uid, sid):
 def require_song(data):
     if not data or data.get("deletedAt") or not data.get("songCreatedAt"):
         raise ValueError("The session must be an undeleted Song.")
-
-
-def python_root():
-    return Path(__file__).resolve().parents[1]
