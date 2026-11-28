@@ -50,7 +50,9 @@ def _fixture(monkeypatch, tmp_path, *, mixes="all", instrumental=True, second=Tr
     async def restore_instrumental_midi(**_):
         return True
     reconciled = []
-    async def reconcile(job_id):
+    async def reconcile(job_id, *, wait=False):
+        # The package waits for its reconcile: in the package job the process ends right after.
+        assert wait is True
         reconciled.append(job_id)
     orchestrator = SimpleNamespace(
         _settings=SimpleNamespace(backend_use_storage=False, project_root=tmp_path,
@@ -424,3 +426,31 @@ def test_solo_and_part_mix_share_m1_safe_part_name(monkeypatch, tmp_path):
         names = archive.namelist()
         assert "Song-Title - Sing All/1 Solo vocals/S_A (lyrics).wav" in names
         assert "Song-Title - Sing All/2 Part-dominant mixes/S_A (lyrics).mp3" in names
+
+
+def test_a_waited_inline_reconcile_finishes_before_it_returns(monkeypatch):
+    # In the package job, nothing keeps the process alive for a background task.
+    import asyncio
+    from types import SimpleNamespace
+
+    from src.backend import sing_all_runner
+    from src.backend.orchestrator import Orchestrator
+
+    finished = []
+
+    class FakeRunner:
+        def __init__(self, _orchestrator):
+            pass
+
+        async def reconcile(self, job_id):
+            await asyncio.sleep(0)
+            finished.append(job_id)
+
+    monkeypatch.setattr(sing_all_runner, "SingAllRunner", FakeRunner)
+    monkeypatch.setattr("src.backend.orchestrator.job_route",
+                        lambda *_: SimpleNamespace(mode="inline"))
+    orchestrator = SimpleNamespace(_settings=None, _logger=SimpleNamespace(error=lambda *_: None))
+
+    asyncio.run(Orchestrator._enqueue_sing_all_reconcile(orchestrator, "parent", wait=True))
+
+    assert finished == ["parent"]

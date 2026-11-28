@@ -2822,11 +2822,22 @@ class Orchestrator:
                 "player_record_update_failed session=%s job=%s", session_id, job_id
             )
 
-    async def _enqueue_sing_all_reconcile(self, job_id: str) -> None:
-        """Wake the parent after a child ends, using the configured reconcile route."""
+    async def _enqueue_sing_all_reconcile(self, job_id: str, *, wait: bool = False) -> None:
+        """Wake the parent after a child ends, using the configured reconcile route.
+
+        Inline, it runs in the background unless wait is set. The package job sets it: its
+        process exits as soon as the package is done, which would drop a background reconcile,
+        so the parent would never move on from packaging.
+        """
         from src.backend.sing_all_runner import SingAllRunner
 
         route = job_route(self._settings, SING_ALL_RECONCILE_KIND)
+        if route.mode == "inline" and wait:
+            try:
+                await SingAllRunner(self).reconcile(job_id)
+            except Exception as exc:
+                self._logger.error("sing_all_reconcile_failed job=%s error=%s", job_id, exc)
+            return
         if route.mode == "inline":
             task = asyncio.create_task(SingAllRunner(self).reconcile(job_id))
             task.add_done_callback(

@@ -341,7 +341,8 @@ async def run_package(job_id: str, orchestrator: Any) -> None:
         await asyncio.to_thread(_package_write, job_id, package)
     finally:
         if package:
-            await orchestrator._enqueue_sing_all_reconcile(job_id)
+            # Waited for: in the package job the process ends right after this returns.
+            await orchestrator._enqueue_sing_all_reconcile(job_id, wait=True)
 
 
 async def start_package(job_id: str, settings: Any) -> None:
