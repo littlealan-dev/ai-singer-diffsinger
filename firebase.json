@@ -363,6 +363,13 @@
         }
       },
       {
+        "source": "/public/s/**",
+        "run": {
+          "serviceId": "sightsinger-api",
+          "region": "us-east4"
+        }
+      },
+      {
         "source": "/jobs/**",
         "destination": "/app.html"
       },
