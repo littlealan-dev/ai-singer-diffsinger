@@ -84,7 +84,8 @@ deploy_args=(
   --image="${IMAGE}"
   --service-account="${RUNTIME_SA}"
   --allow-unauthenticated
-  --cpu=1
+  # Two vCPU: a share page loads every take at once when play is pressed.
+  --cpu=2
   # Room for drawing a thumbnail for a Song from before thumbnails existed.
   --memory=1Gi
   --concurrency=40
