@@ -498,6 +498,18 @@ class Settings:
             raise ValueError("SING_ALL_RECONCILE_DISPATCH_MODE must be inline, http, or cloud_tasks.")
         sing_all_reconcile_url = os.getenv("SING_ALL_RECONCILE_URL", "").strip().rstrip("/")
         sing_all_reconcile_tasks_queue = os.getenv("SING_ALL_RECONCILE_TASKS_QUEUE", "").strip()
+        # Checked at start-up, like the premium route: a missing value would otherwise surface only
+        # when the first wake fails to dispatch, leaving a Sing All job stuck.
+        if sing_all_reconcile_dispatch_mode != "inline" and not sing_all_reconcile_url:
+            raise ValueError("SING_ALL_RECONCILE_URL is required when SING_ALL_RECONCILE_DISPATCH_MODE is not inline.")
+        if sing_all_reconcile_dispatch_mode == "cloud_tasks":
+            if not sing_all_reconcile_tasks_queue:
+                raise ValueError(
+                    "SING_ALL_RECONCILE_TASKS_QUEUE is required with SING_ALL_RECONCILE_DISPATCH_MODE=cloud_tasks.")
+            if not os.getenv("SING_ALL_RECONCILE_INVOKER_SERVICE_ACCOUNT", "").strip():
+                raise ValueError(
+                    "SING_ALL_RECONCILE_INVOKER_SERVICE_ACCOUNT is required with "
+                    "SING_ALL_RECONCILE_DISPATCH_MODE=cloud_tasks.")
         sing_all_singing_transport = os.getenv("SING_ALL_SINGING_TRANSPORT", "dispatch").strip().lower()
         if sing_all_singing_transport not in {"dispatch", "render_job"}:
             raise ValueError("SING_ALL_SINGING_TRANSPORT must be dispatch or render_job.")

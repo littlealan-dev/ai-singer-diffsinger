@@ -271,3 +271,51 @@ def test_the_caller_check_accepts_only_the_kinds_invoker(monkeypatch):
 
     assert refused.value.status_code == 403
     assert audiences == ["https://synthesis.example.run.app"]
+
+
+_RECONCILE_ENV = ("SING_ALL_RECONCILE_DISPATCH_MODE", "SING_ALL_RECONCILE_URL",
+                  "SING_ALL_RECONCILE_TASKS_QUEUE", "SING_ALL_RECONCILE_INVOKER_SERVICE_ACCOUNT")
+
+
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        ({"SING_ALL_RECONCILE_DISPATCH_MODE": "cloud_tasks"}, "SING_ALL_RECONCILE_URL"),
+        ({"SING_ALL_RECONCILE_DISPATCH_MODE": "http"}, "SING_ALL_RECONCILE_URL"),
+        ({"SING_ALL_RECONCILE_DISPATCH_MODE": "cloud_tasks",
+          "SING_ALL_RECONCILE_URL": "https://api.example"}, "SING_ALL_RECONCILE_TASKS_QUEUE"),
+        ({"SING_ALL_RECONCILE_DISPATCH_MODE": "cloud_tasks",
+          "SING_ALL_RECONCILE_URL": "https://api.example",
+          "SING_ALL_RECONCILE_TASKS_QUEUE": "projects/p/locations/us-east4/queues/sing-all-reconcile"},
+         "SING_ALL_RECONCILE_INVOKER_SERVICE_ACCOUNT"),
+    ],
+)
+def test_sing_all_reconcile_route_settings_are_checked_at_start(monkeypatch, env, message):
+    # A missing value would otherwise only show when the first wake fails, leaving a job stuck.
+    for name in _RECONCILE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=message):
+        Settings.from_env()
+
+
+def test_a_complete_cloud_tasks_reconcile_route_is_accepted(monkeypatch):
+    for name, value in {
+        "SING_ALL_RECONCILE_DISPATCH_MODE": "cloud_tasks",
+        "SING_ALL_RECONCILE_URL": "https://api.example/",
+        "SING_ALL_RECONCILE_TASKS_QUEUE": "projects/p/locations/us-east4/queues/sing-all-reconcile",
+        "SING_ALL_RECONCILE_INVOKER_SERVICE_ACCOUNT": "Invoker@P.iam.gserviceaccount.com",
+    }.items():
+        monkeypatch.setenv(name, value)
+    route = job_route(Settings.from_env(), SING_ALL_RECONCILE_KIND)
+    assert route.mode == "cloud_tasks"
+    assert route.endpoint("job-1") == "https://api.example/internal/sing-all/reconcile"
+    assert route.audience == "https://api.example"
+    assert route.invoker_service_account == "invoker@p.iam.gserviceaccount.com"
+
+
+def test_inline_reconcile_needs_no_route_settings(monkeypatch):
+    for name in _RECONCILE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    assert Settings.from_env().sing_all_reconcile_dispatch_mode == "inline"
